@@ -5,6 +5,20 @@ from db import conn, cursor
 
 app = FastAPI(title="Expense Intelligence API")
 
+# ---------------------------------------
+# ✅ ADD THIS BLOCK HERE (ONCE)
+# ---------------------------------------
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS transactions (
+    id SERIAL PRIMARY KEY,
+    date DATE,
+    description TEXT,
+    category TEXT,
+    amount NUMERIC
+)
+""")
+conn.commit()
+
 # ---------------------------------------------------
 # CORS (safe for local Streamlit + future deployment)
 # ---------------------------------------------------
