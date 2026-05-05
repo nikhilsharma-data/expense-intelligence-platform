@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = "https://expense-intelligence-platform.onrender.com"
 
 # -------------------------------------------------
 # PAGE CONFIG
