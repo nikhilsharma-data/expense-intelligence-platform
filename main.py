@@ -478,7 +478,9 @@ def get_insights(range: str = "all"):
             AND EXTRACT(DOW FROM date) IN (0,6)
         """)
 
-    weekend = safe_number(cursor.fetchone()[0])
+    row = cursor.fetchone()
+
+    weekend = safe_number(row[0]) if row else 0
 
     if expense > 0:
         pct = (weekend / expense) * 100
