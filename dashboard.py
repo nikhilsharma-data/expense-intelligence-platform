@@ -267,30 +267,52 @@ with tab3:
     st.caption("Recommended rows: up to 5,000")
 
     uploaded_file = st.file_uploader(
-        "Upload Expense CSV",
-        type=["csv"]
+        "Upload Bank Statement",
+        type=["csv", "pdf"]
     )
 
-    if uploaded_file:
+    if uploaded_file is not None:
 
-        files = {
-            "file": (
-                uploaded_file.name,
-                uploaded_file.getvalue(),
-                "text/csv"
+        file_type = uploaded_file.name.split(".")[-1].lower()
+
+        # =========================================
+        # CSV Upload Flow
+        # =========================================
+        if file_type == "csv":
+
+            files = {
+                "file": (
+                    uploaded_file.name,
+                    uploaded_file.getvalue(),
+                    "text/csv"
+                )
+            }
+
+            response = requests.post(
+                f"{BASE_URL}/upload",
+                files=files
             )
-        }
 
-        response = requests.post(
-            f"{BASE_URL}/upload",
-            files=files
-        )
+            if response.status_code == 200:
+                st.success("CSV uploaded successfully!")
+                st.rerun()
+            else:
+                st.error("CSV upload failed.")
 
-        if response.status_code == 200:
-            st.success("File uploaded successfully!")
-            st.rerun()
-        else:
-            st.error("Upload failed.")
+        # =========================================
+        # PDF Upload Flow
+        # =========================================
+        elif file_type == "pdf":
+
+            # Save uploaded PDF temporarily
+            with open("uploaded_statement.pdf", "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            st.success("PDF uploaded successfully!")
+
+            st.info(
+                "PDF parsing engine will be implemented next."
+            )
 
     sample_csv = """Date,Description,Amount
 2026-01-01,Salary,60000

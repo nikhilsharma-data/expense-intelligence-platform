@@ -517,7 +517,7 @@ def get_insights(range: str = "all"):
 
     row = cursor.fetchone()
 
-    avg_month = safe_number(row[0])
+    avg_month = safe_number(row[0]) if row else 0
 
     if avg_month > 0:
         insights.append(
