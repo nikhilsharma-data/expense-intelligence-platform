@@ -262,8 +262,10 @@ with tab2:
 # =================================================
 with tab3:
 
-    st.header("📂 Upload CSV File")
-    st.caption("Accepted columns: Date, Description, Amount")
+    st.header("📂 Upload Bank Statement")
+    st.caption(
+    "Supports CSV uploads and future PDF bank statements."
+    )
     st.caption("Recommended rows: up to 5,000")
 
     uploaded_file = st.file_uploader(
@@ -312,6 +314,20 @@ with tab3:
 
             st.info(
                 "PDF parsing engine will be implemented next."
+            )
+            st.info(
+            """
+            ✅ Supported Statement Formats (Upcoming)
+
+            • HDFC Bank PDF
+            • SBI Bank PDF
+            • ICICI Bank PDF
+            • Axis Bank PDF
+            • Kotak Bank PDF
+            • CSV Statements
+
+            PDF parsing engine is currently under development.
+            """
             )
 
     sample_csv = """Date,Description,Amount
