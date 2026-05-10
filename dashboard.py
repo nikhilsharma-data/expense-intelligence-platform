@@ -121,15 +121,26 @@ with tab1:
         # Expenses only
         expense_df = df.copy()
 
-        if not expense_df.empty:
+        if expense_df.empty:
+
+            st.info(
+                """
+                No transaction data available yet.
+
+                Upload a CSV or PDF bank statement
+                to generate analytics and insights.
+                """
+            )
+
+        else:
 
             expense_df["total"] = expense_df["total"].abs()
             expense_df = expense_df.sort_values("total", ascending=True)
 
             # Horizontal Bar Chart
             fig_bar, ax = plt.subplots(
-                figsize=(8,4),
-                facecolor="#0E1117"
+            figsize=(8,4),
+            facecolor="#0E1117"
             )
 
             ax.set_facecolor("#0E1117")
@@ -145,9 +156,6 @@ with tab1:
 
             plt.tight_layout()
             st.pyplot(fig_bar, width="stretch")
-
-        else:
-            st.info("No expense data available.")
 
         # ---------------- DONUT CHART ----------------
         st.subheader("🥧 Expense Distribution")
