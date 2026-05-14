@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import matplotlib.pyplot as plt
+import pdfplumber
 
 BASE_URL = "https://expense-intelligence-platform.onrender.com"
 
@@ -282,6 +283,10 @@ with tab3:
     )
 
     if uploaded_file is not None:
+        
+        st.caption(
+            f"Last uploaded file: {uploaded_file.name}"
+        )
 
         file_type = uploaded_file.name.split(".")[-1].lower()
 
