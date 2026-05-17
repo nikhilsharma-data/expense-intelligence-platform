@@ -325,9 +325,25 @@ with tab3:
 
             st.success("PDF uploaded successfully!")
 
-            st.info(
-                "PDF parsing engine will be implemented next."
+            extracted_text = ""
+
+            with pdfplumber.open("uploaded_statement.pdf") as pdf:
+
+                for page in pdf.pages:
+
+                    text = page.extract_text()
+
+                    if text:
+                        extracted_text += text + "\n"
+
+            st.subheader("📄 Extracted Statement Preview")
+
+            st.text_area(
+                "Extracted Text",
+                extracted_text[:5000],
+                height=400
             )
+            
             st.info(
             """
             ✅ Supported Statement Formats (Upcoming)
