@@ -2,9 +2,8 @@ import streamlit as st
 import requests
 import pandas as pd
 import matplotlib.pyplot as plt
-import pdfplumber
 
-BASE_URL = "https://expense-intelligence-platform.onrender.com"
+BASE_URL = "http://127.0.0.1:8000"
 
 # -------------------------------------------------
 # PAGE CONFIG
@@ -319,45 +318,67 @@ with tab3:
         # =========================================
         elif file_type == "pdf":
 
-            # Save uploaded PDF temporarily
-            with open("uploaded_statement.pdf", "wb") as f:
-                f.write(uploaded_file.getbuffer())
+            files = {
+                "file": (
+                    uploaded_file.name,
+                    uploaded_file.getvalue(),
+                    "application/pdf"
+                )
+            }
 
-            st.success("PDF uploaded successfully!")
-
-            extracted_text = ""
-
-            with pdfplumber.open("uploaded_statement.pdf") as pdf:
-
-                for page in pdf.pages:
-
-                    text = page.extract_text()
-
-                    if text:
-                        extracted_text += text + "\n"
-
-            st.subheader("📄 Extracted Statement Preview")
-
-            st.text_area(
-                "Extracted Text",
-                extracted_text[:5000],
-                height=400
+            response = requests.post(
+                f"{BASE_URL}/upload",
+                files=files
             )
             
-            st.info(
-            """
-            ✅ Supported Statement Formats (Upcoming)
+            print("PDF Upload Response:", response.status_code)
+            print(response.text)
 
-            • HDFC Bank PDF
-            • SBI Bank PDF
-            • ICICI Bank PDF
-            • Axis Bank PDF
-            • Kotak Bank PDF
-            • CSV Statements
+            if response.status_code == 200:
 
-            PDF parsing engine is currently under development.
-            """
+                result = response.json()
+
+                st.success("PDF uploaded successfully!")
+
+                extracted_text = result.get("preview", "")
+                transactions = result.get("transactions", [])
+
+                # ==============================
+                # Transaction Count
+                # ==============================
+                st.info(
+                    f"Transactions detected: {len(transactions)}"
             )
+
+                # ==============================
+                # Empty PDF Detection
+                # ==============================
+                if not extracted_text.strip():
+
+                    st.warning(
+                        """
+                        No readable text detected.
+
+                        This may be:
+                        • scanned/image-based PDF
+                        • unsupported statement format
+                        • extraction issue in parser
+                        """
+                    )
+
+                else:
+
+                    st.subheader("📄 Extracted Statement Preview")
+
+                    st.text_area(
+                        "Extracted Text",
+                        extracted_text,
+                        height=400
+                    )
+
+            else:
+                st.error(f"Status Code: {response.status_code}")
+                st.error(f"Response: {response.text}")
 
     sample_csv = """Date,Description,Amount
 2026-01-01,Salary,60000

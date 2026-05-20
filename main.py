@@ -1,7 +1,12 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from matplotlib import lines
 import pandas as pd
+from streamlit import pdf, text
 from db import conn, cursor
+import pdfplumber
+import re
+from io import BytesIO
 
 app = FastAPI(title="Expense Intelligence API")
 
@@ -53,83 +58,60 @@ def get_date_filter(range_value):
     return None
 
 
-def categorize(desc):
-    desc = str(desc).lower().strip()
+def categorize(description):
 
-    # Income
-    if any(word in desc for word in [
-        "salary", "bonus", "freelance",
-        "refund received", "payment received"
-    ]):
+    desc = description.upper()
+
+    # ---------------- INCOME ----------------
+    if "SALARY" in desc or "NEFT CR" in desc:
         return "Income"
 
-    # Housing
-    elif any(word in desc for word in [
-        "rent", "maintenance", "society"
-    ]):
-        return "Housing"
+    if "CASH DEP" in desc or "CREDIT INTEREST" in desc or "REV-" in desc:
+        return "Income"
 
-    # Food
-    elif any(word in desc for word in [
-        "swiggy", "zomato", "restaurant",
-        "food", "pizza", "burger",
-        "dinner", "lunch", "cafe"
-    ]):
+    # ---------------- FOOD ----------------
+    elif "FOOD" in desc or "GROCER" in desc or "RESTAURANT" in desc:
         return "Food"
 
-    # Travel
-    elif any(word in desc for word in [
-        "uber", "ola", "rapido",
-        "metro", "cab", "taxi",
-        "bus", "train"
-    ]):
-        return "Travel"
-
-    # Fuel
-    elif any(word in desc for word in [
-        "fuel", "petrol", "diesel"
-    ]):
+    # ---------------- FUEL ----------------
+    elif "FUEL" in desc or "PETROL" in desc:
         return "Fuel"
 
-    # Shopping
-    elif any(word in desc for word in [
-        "amazon", "flipkart", "myntra",
-        "ajio", "shopping"
-    ]):
+    # ---------------- EMI / LOAN ----------------
+    elif "EMI" in desc or "LOAN" in desc:
+        return "EMI"
+
+    # ---------------- UTILITIES ----------------
+    elif "ELECTRIC" in desc or "MOBILE" in desc or "BILLPAY" in desc:
+        return "Utilities"
+
+    # ---------------- INSURANCE ----------------
+    elif "INSURE" in desc:
+        return "Insurance"
+
+    # ---------------- SHOPPING ----------------
+    elif "SHOP" in desc or "MART" in desc:
         return "Shopping"
 
-    # Bills
-    elif any(word in desc for word in [
-        "electricity", "wifi", "internet",
-        "mobile bill", "water bill",
-        "broadband"
-    ]):
-        return "Bills"
+    # ---------------- SUBSCRIPTION ----------------
+    elif "STREAMING" in desc or "NETFLIX" in desc or "SUBSCRIPTION" in desc:
+        return "Subscription"
 
-    # Investments
-    elif any(word in desc for word in [
-        "sip", "mutual fund", "groww",
-        "zerodha", "stocks", "investment"
-    ]):
-        return "Investment"
+    # ---------------- TRANSFER ----------------
+    elif "IMPS" in desc or "NEFT DR" in desc or "UPI" in desc:
+        return "Transfer"
 
-    # Health
-    elif any(word in desc for word in [
-        "hospital", "doctor",
-        "medicine", "medical",
-        "pharmacy"
-    ]):
-        return "Health"
+    # ---------------- CREDIT CARD ----------------
+    elif "CREDITCARD" in desc or "CARD" in desc:
+        return "Card Payment"
 
-    # Entertainment
-    elif any(word in desc for word in [
-        "netflix", "spotify",
-        "prime", "movie",
-        "hotstar"
-    ]):
-        return "Entertainment"
+    # ---------------- VEHICLE ----------------
+    elif "MOTOR" in desc or "VEHICLE" in desc:
+        return "Vehicle"
 
-    return "Others"
+    # ---------------- DEFAULT ----------------
+    else:
+        return "Others"
 
 
 # ---------------------------------------------------
@@ -145,28 +127,165 @@ def root():
 # ---------------------------------------------------
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
+    
+    print("UPLOAD API HIT")
+
     try:
-        df = pd.read_csv(file.file)
 
-        df.columns = df.columns.str.strip().str.lower()
+        filename = file.filename.lower()
 
-        required_cols = ["date", "description", "amount"]
+        # =================================================
+        # CSV FLOW
+        # =================================================
+        if filename.endswith(".csv"):
 
-        for col in required_cols:
-            if col not in df.columns:
-                return {"error": f"Missing column: {col}"}
+            df = pd.read_csv(file.file)
 
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+            df.columns = df.columns.str.strip().str.lower()
 
-        df = df.dropna(subset=["date", "amount"])
+            required_cols = ["date", "description", "amount"]
 
-        # Clear old data
+            for col in required_cols:
+                if col not in df.columns:
+                    return {"error": f"Missing column: {col}"}
+
+            df["date"] = pd.to_datetime(
+                df["date"],
+                errors="coerce"
+            )
+
+            df["amount"] = pd.to_numeric(
+                df["amount"],
+                errors="coerce"
+            )
+
+            df = df.dropna(subset=["date", "amount"])
+
+        # =================================================
+        # PDF FLOW
+        # =================================================
+        elif filename.endswith(".pdf"):
+
+            pdf_bytes = await file.read()
+
+            extracted_text = ""
+
+            with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+
+                for page in pdf.pages:
+
+                    # -------------------------
+                    # TEXT EXTRACTION
+                    # -------------------------
+                    text = page.extract_text()
+
+                    print("\n===== PAGE DEBUG =====")
+
+                    if text:
+                        print(text[:1000])
+                        extracted_text += text + "\n"
+                    else:
+                        print("extract_text() returned None")
+
+                    # -------------------------
+                    # TABLE EXTRACTION
+                    # -------------------------
+                    tables = page.extract_tables()
+
+                    print(f"Tables found: {len(tables)}")
+
+                    if tables:
+                        print("Sample table:")
+                        try:
+                            print(tables[0][:5])
+                        except Exception as e:
+                            print(f"Table debug error: {e}")
+                    else:
+                        print("No tables found")
+        
+                    
+                    print("\n========== PAGE TEXT ==========\n")
+                    print(text)
+
+                    if text:
+                        extracted_text += text + "\n"
+
+            transactions = []
+
+            for page in pdf.pages:
+
+                tables = page.extract_tables()
+
+                for table in tables:
+
+                    for row in table[1:]:   # skip header row
+
+                        try:
+                            date = row[0]
+                            description = row[1]
+
+                            withdrawal = row[4]
+                            deposit = row[5]
+
+                            if deposit and deposit.strip():
+                                amount = float(deposit.replace(",", ""))
+                            elif withdrawal and withdrawal.strip():
+                                amount = -float(withdrawal.replace(",", ""))
+                            else:
+                                continue
+
+                            transactions.append({
+                                "date": date,
+                                "description": description,
+                                "amount": amount
+                            })
+
+                        except Exception as e:
+                            print("Row parse error:", row, e)
+
+            for txn in transactions:
+                print(txn)
+            # -------------------------
+            # SAVE PDF TRANSACTIONS TO DB
+            # -------------------------
+
+            cursor.execute("DELETE FROM transactions")
+
+            for txn in transactions:
+
+                category = categorize(txn["description"])
+
+                cursor.execute("""
+                    INSERT INTO transactions
+                    (date, description, amount, category)
+                    VALUES (%s, %s, %s, %s)
+                """, (
+                    pd.to_datetime(txn["date"], dayfirst=True),
+                    txn["description"],
+                    txn["amount"],
+                    category
+                ))
+
+            conn.commit()
+
+            print(f"{len(transactions)} transactions inserted into DB")
+            
+            return {
+                "status": "success",
+                "preview": extracted_text[:5000],
+                "transactions": transactions[:20]
+            }
+
+        # =================================================
+        # CLEAR OLD DATA
+        # =================================================
         cursor.execute("DELETE FROM transactions")
 
         for _, row in df.iterrows():
 
-            category = categorize(row["description"])
+            category = categorize(
+                row["description"]
+            )
 
             cursor.execute("""
                 INSERT INTO transactions
@@ -187,8 +306,12 @@ async def upload_file(file: UploadFile = File(...)):
         }
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
+
         conn.rollback()
-        return {"error": str(e)}
+
+        raise e
 
 
 # ---------------------------------------------------
