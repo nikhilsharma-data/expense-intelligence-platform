@@ -68,6 +68,9 @@ def categorize(description):
 
     if "CASH DEP" in desc or "CREDIT INTEREST" in desc or "REV-" in desc:
         return "Income"
+    
+    if "REV-" in desc or "REVERSAL" in desc:
+        return "Income"
 
     # ---------------- FOOD ----------------
     elif "FOOD" in desc or "GROCER" in desc or "RESTAURANT" in desc:

@@ -366,16 +366,6 @@ with tab3:
                         """
                     )
 
-                else:
-
-                    st.subheader("📄 Extracted Statement Preview")
-
-                    st.text_area(
-                        "Extracted Text",
-                        extracted_text,
-                        height=400
-                    )
-
             else:
                 st.error(f"Status Code: {response.status_code}")
                 st.error(f"Response: {response.text}")
