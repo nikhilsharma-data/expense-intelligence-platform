@@ -358,6 +358,31 @@ def get_summary(range: str = "all"):
         "savings_percent": round(savings_pct, 1)
     }
 
+# ---------------------------------------------------
+# TRANSACTION
+# ---------------------------------------------------
+@app.get("/transactions")
+def get_transactions():
+
+    cursor.execute("""
+        SELECT date, description, amount, category
+        FROM transactions
+        ORDER BY date DESC
+    """)
+
+    rows = cursor.fetchall()
+
+    transactions = []
+
+    for row in rows:
+        transactions.append({
+            "date": str(row[0]),
+            "description": row[1],
+            "amount": row[2],
+            "category": row[3]
+        })
+
+    return transactions
 
 # ---------------------------------------------------
 # CATEGORY BREAKDOWN

@@ -3,6 +3,8 @@ import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from main import safe_number
+
 BASE_URL = "http://127.0.0.1:8000"
 
 # -------------------------------------------------
@@ -54,6 +56,14 @@ summary = safe_get("summary",{},params={"range": date_range})
 categories = safe_get("category-breakdown", [], params={"range": date_range})
 trend = safe_get("monthly-trend", [], params={"range": date_range})
 insights = safe_get("insights", {}, params={"range": date_range})
+transactions = safe_get("transactions", [])
+has_data = False
+if summary:
+    expense = abs(safe_number(summary.get("total_expense", 0)))
+    income = safe_number(summary.get("total_income", 0))
+
+    if expense > 0 or income > 0:
+        has_data = True
 
 # -------------------------------------------------
 # TABS
@@ -64,6 +74,20 @@ tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🧠 Insights", "📂 Upload"])
 # DASHBOARD TAB
 # =================================================
 with tab1:
+    
+    if not has_data:
+
+        st.info(
+            """
+            No bank statement uploaded yet.
+
+            Please go to Upload tab and upload
+            a CSV or PDF bank statement
+            to begin analysis.
+            """
+        )
+
+        st.stop()
 
     # ---------------- KPI SECTION ----------------
     st.header("📌 Summary")
@@ -264,6 +288,65 @@ with tab2:
 
     else:
         st.info("No insights available.")
+        
+        
+# ---------------- TRANSACTION TABLE ----------------
+
+    st.header("📋 Transaction Details")
+
+    if transactions:
+
+        txn_df = pd.DataFrame(transactions)
+        txn_df["type"] = txn_df["amount"].apply(
+        lambda x: "Credit" if x > 0 else "Debit"
+    )
+
+        txn_df["display_amount"] = txn_df["amount"].apply(
+        lambda x: f"+₹ {x:,.0f}" if x > 0 else f"-₹ {abs(x):,.0f}"
+    )
+    
+        search_text = st.text_input(
+            "Search description"
+        )
+
+        if search_text:
+            txn_df = txn_df[
+                txn_df["description"].str.contains(
+                    search_text,
+                    case=False,
+                    na=False
+                )
+            ]
+
+        display_df = txn_df[
+        ["date", "description", "type", "display_amount", "category"]
+        ]
+
+        display_df.columns = [
+            "Date",
+            "Description",
+            "Type",
+            "Amount",
+            "Category"
+        ]
+
+        st.dataframe(
+            display_df,
+            width="stretch",
+            hide_index=True
+        )
+
+        csv = txn_df.to_csv(index=False)
+
+        st.download_button(
+            "⬇ Download Transactions CSV",
+            csv,
+            file_name="transactions.csv",
+            mime="text/csv"
+        )
+
+    else:
+        st.info("No transactions available.")
 
 # =================================================
 # UPLOAD TAB
