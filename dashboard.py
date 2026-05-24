@@ -7,6 +7,103 @@ from main import safe_number
 
 BASE_URL = "http://127.0.0.1:8000"
 
+# ---------------------------------------------------
+# SESSION STATE
+# ---------------------------------------------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if "user_id" not in st.session_state:
+    st.session_state.user_id = None
+
+if "user_name" not in st.session_state:
+    st.session_state.user_name = None
+    
+# ---------------------------------------------------
+# LOGIN / SIGNUP SCREEN
+# ---------------------------------------------------
+if not st.session_state.logged_in:
+
+    st.title("🔐 Expense Intelligence Login")
+
+    auth_tab1, auth_tab2 = st.tabs(["Login", "Signup"])
+
+    # LOGIN
+    with auth_tab1:
+        email = st.text_input("Email")
+        password = st.text_input(
+            "Password",
+            type="password"
+        )
+
+        if st.button("Login"):
+
+            response = requests.post(
+                f"{BASE_URL}/login",
+                json={
+                    "email": email,
+                    "password": password
+                }
+            )
+
+            data = response.json()
+
+            if data.get("status") == "success":
+                st.session_state.logged_in = True
+                st.session_state.user_id = data["user_id"]
+                st.session_state.user_name = data["name"]
+
+                st.success("Login successful!")
+                st.rerun()
+
+            else:
+                st.error(
+                    data.get("error", "Login failed")
+                )
+
+    # SIGNUP
+    with auth_tab2:
+        name = st.text_input("Name")
+        signup_email = st.text_input("Signup Email")
+        signup_password = st.text_input(
+            "Signup Password",
+            type="password"
+        )
+
+        if st.button("Create Account"):
+
+            response = requests.post(
+                f"{BASE_URL}/signup",
+                json={
+                    "name": name,
+                    "email": signup_email,
+                    "password": signup_password
+                }
+            )
+
+            data = response.json()
+
+            if data.get("status") == "success":
+                st.success(
+                    "Account created! Please login."
+                )
+            else:
+                st.error(
+                    data.get("error", "Signup failed")
+                )
+
+    st.stop()
+    
+st.sidebar.success(
+    f"Welcome, {st.session_state.user_name}"
+)
+
+if st.sidebar.button("Logout"):
+    st.session_state.logged_in = False
+    st.session_state.user_id = None
+    st.session_state.user_name = None
+    st.rerun()
+
 # -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
@@ -52,11 +149,12 @@ def safe_get(endpoint, default, params=None):
     except:
         return default
 
-summary = safe_get("summary",{},params={"range": date_range})
-categories = safe_get("category-breakdown", [], params={"range": date_range})
-trend = safe_get("monthly-trend", [], params={"range": date_range})
-insights = safe_get("insights", {}, params={"range": date_range})
-transactions = safe_get("transactions", [])
+summary = safe_get("summary",{},params={"range": date_range, "user_id": st.session_state.user_id})
+categories = safe_get("category-breakdown", [], params={"range": date_range, "user_id": st.session_state.user_id})
+trend = safe_get("monthly-trend", [], params={"range": date_range, "user_id": st.session_state.user_id})
+insights = safe_get("insights", {}, params={"range": date_range, "user_id": st.session_state.user_id})
+transactions = safe_get("transactions", [], params={"user_id": st.session_state.user_id})
+
 has_data = False
 if summary:
     expense = abs(safe_number(summary.get("total_expense", 0)))
@@ -87,10 +185,10 @@ with tab1:
             """
         )
 
-        st.stop()
+    else:
 
     # ---------------- KPI SECTION ----------------
-    st.header("📌 Summary")
+        st.header("📌 Summary")
 
     balance = summary.get("total") or 0
     expense = summary.get("total_expense") or 0
@@ -355,7 +453,7 @@ with tab3:
 
     st.header("📂 Upload Bank Statement")
     st.caption(
-    "Supports CSV uploads and future PDF bank statements."
+    "Supports CSV and PDF bank statements."
     )
     st.caption("Recommended rows: up to 5,000")
 
@@ -387,6 +485,7 @@ with tab3:
 
             response = requests.post(
                 f"{BASE_URL}/upload",
+                params={"user_id": st.session_state.user_id},
                 files=files
             )
 
@@ -411,6 +510,7 @@ with tab3:
 
             response = requests.post(
                 f"{BASE_URL}/upload",
+                params={"user_id": st.session_state.user_id},
                 files=files
             )
             

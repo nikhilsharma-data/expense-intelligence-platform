@@ -1,11 +1,10 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from matplotlib import lines
 import pandas as pd
-from streamlit import pdf, text
 from db import conn, cursor
 import pdfplumber
 import re
+from pydantic import BaseModel
 from io import BytesIO
 
 app = FastAPI(title="Expense Intelligence API")
@@ -16,6 +15,7 @@ app = FastAPI(title="Expense Intelligence API")
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS transactions (
     id SERIAL PRIMARY KEY,
+    user_id INTEGER,
     date DATE,
     description TEXT,
     category TEXT,
@@ -118,18 +118,143 @@ def categorize(description):
 
 
 # ---------------------------------------------------
+# PASSWORD SECURITY
+# ---------------------------------------------------
+import bcrypt
+
+def hash_password(password):
+    hashed = bcrypt.hashpw(
+        password.encode("utf-8"),
+        bcrypt.gensalt()
+    )
+    return hashed.decode("utf-8")
+
+
+def verify_password(plain_password, hashed_password):
+    return bcrypt.checkpw(
+        plain_password.encode("utf-8"),
+        hashed_password.encode("utf-8")
+    )
+
+
+# ---------------------------------------------------
+# REQUEST MODELS
+# ---------------------------------------------------
+class SignupRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+    
+    
+# ---------------------------------------------------
 # ROOT
 # ---------------------------------------------------
 @app.get("/")
 def root():
     return {"status": "Expense Intelligence API Running"}
 
+# ---------------------------------------------------
+# SIGNUP
+# ---------------------------------------------------
+@app.post("/signup")
+def signup(user: SignupRequest):
+
+    try:
+        cursor.execute(
+            "SELECT id FROM users WHERE email = %s",
+            (user.email,)
+        )
+
+        existing = cursor.fetchone()
+
+        if existing:
+            return {
+                "error": "Email already exists"
+            }
+
+        hashed_pw = hash_password(
+            user.password
+        )
+
+        cursor.execute("""
+            INSERT INTO users
+            (name, email, password_hash)
+            VALUES (%s, %s, %s)
+            RETURNING id
+        """, (
+            user.name,
+            user.email,
+            hashed_pw
+        ))
+
+        user_id = cursor.fetchone()[0]
+
+        conn.commit()
+
+        return {
+            "status": "success",
+            "user_id": user_id
+        }
+
+    except Exception as e:
+        conn.rollback()
+        return {"error": str(e)}
+
+# ---------------------------------------------------
+# LOGIN
+# ---------------------------------------------------
+@app.post("/login")
+def login(user: LoginRequest):
+
+    try:
+        cursor.execute("""
+            SELECT id, name, password_hash
+            FROM users
+            WHERE email = %s
+        """, (user.email,))
+
+        row = cursor.fetchone()
+
+        if not row:
+            return {
+                "error": "User not found"
+            }
+
+        user_id = row[0]
+        name = row[1]
+        stored_hash = row[2]
+
+        if not verify_password(
+            user.password,
+            stored_hash
+        ):
+            return {
+                "error": "Invalid password"
+            }
+
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "name": name
+        }
+
+    except Exception as e:
+        conn.rollback()
+        return {"error": str(e)}
 
 # ---------------------------------------------------
 # UPLOAD CSV
 # ---------------------------------------------------
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    user_id: int,
+    file: UploadFile = File(...)
+):
     
     print("UPLOAD API HIT")
 
@@ -252,7 +377,10 @@ async def upload_file(file: UploadFile = File(...)):
             # SAVE PDF TRANSACTIONS TO DB
             # -------------------------
 
-            cursor.execute("DELETE FROM transactions")
+            cursor.execute(
+                "DELETE FROM transactions WHERE user_id = %s",
+                (user_id,)
+            )
 
             for txn in transactions:
 
@@ -260,9 +388,10 @@ async def upload_file(file: UploadFile = File(...)):
 
                 cursor.execute("""
                     INSERT INTO transactions
-                    (date, description, amount, category)
-                    VALUES (%s, %s, %s, %s)
+                    (user_id, date, description, amount, category)
+                    VALUES (%s, %s, %s, %s, %s)
                 """, (
+                    user_id,
                     pd.to_datetime(txn["date"], dayfirst=True),
                     txn["description"],
                     txn["amount"],
@@ -282,7 +411,7 @@ async def upload_file(file: UploadFile = File(...)):
         # =================================================
         # CLEAR OLD DATA
         # =================================================
-        cursor.execute("DELETE FROM transactions")
+        cursor.execute("DELETE FROM transactions WHERE user_id = %s", (user_id,))
 
         for _, row in df.iterrows():
 
@@ -292,9 +421,10 @@ async def upload_file(file: UploadFile = File(...)):
 
             cursor.execute("""
                 INSERT INTO transactions
-                (date, description, amount, category)
-                VALUES (%s,%s,%s,%s)
+                (user_id,date, description, amount, category)
+                VALUES (%s,%s,%s,%s,%s)
             """, (
+                user_id,
                 row["date"],
                 row["description"],
                 row["amount"],
@@ -321,7 +451,10 @@ async def upload_file(file: UploadFile = File(...)):
 # SUMMARY
 # ---------------------------------------------------
 @app.get("/summary")
-def get_summary(range: str = "all"):
+def get_summary(range: str = "all", user_id: int = None):
+
+    if user_id is None:
+        return {"error": "user_id required"}
 
     start_date = get_date_filter(range)
 
@@ -332,8 +465,8 @@ def get_summary(range: str = "all"):
             COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END),0),
             COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),0)
         FROM transactions
-        WHERE date >= %s
-    """, (start_date,))
+        WHERE user_id = %s AND date >= %s
+    """, (user_id, start_date))
     else:
         cursor.execute("""
         SELECT
@@ -341,7 +474,8 @@ def get_summary(range: str = "all"):
             COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END),0),
             COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),0)
         FROM transactions
-    """)
+        WHERE user_id = %s
+    """, (user_id,))
 
     result = cursor.fetchone()
 
@@ -362,13 +496,17 @@ def get_summary(range: str = "all"):
 # TRANSACTION
 # ---------------------------------------------------
 @app.get("/transactions")
-def get_transactions():
+def get_transactions(user_id: int):
+
+    if user_id is None:
+        return {"error": "user_id required"}
 
     cursor.execute("""
         SELECT date, description, amount, category
         FROM transactions
+        WHERE user_id = %s
         ORDER BY date DESC
-    """)
+    """, (user_id,))
 
     rows = cursor.fetchall()
 
@@ -388,7 +526,10 @@ def get_transactions():
 # CATEGORY BREAKDOWN
 # ---------------------------------------------------
 @app.get("/category-breakdown")
-def category_breakdown(range: str = "all"):
+def category_breakdown(range: str = "all", user_id: int = None):
+
+    if user_id is None:
+        return {"error": "user_id required"}
 
     start_date = get_date_filter(range)
 
@@ -396,19 +537,19 @@ def category_breakdown(range: str = "all"):
         cursor.execute("""
             SELECT category, ABS(SUM(amount)) AS total
             FROM transactions
-            WHERE amount < 0
+            WHERE user_id = %s AND amount < 0
             AND date >= %s
             GROUP BY category
             ORDER BY total DESC
-        """, (start_date,))
+        """, (user_id, start_date))
     else:
         cursor.execute("""
             SELECT category, ABS(SUM(amount)) AS total
             FROM transactions
-            WHERE amount < 0
+            WHERE user_id = %s AND amount < 0
             GROUP BY category
             ORDER BY total DESC
-        """)
+        """, (user_id,))
 
     rows = cursor.fetchall()
 
@@ -425,7 +566,10 @@ def category_breakdown(range: str = "all"):
 # MONTHLY TREND
 # ---------------------------------------------------
 @app.get("/monthly-trend")
-def monthly_trend(range: str = "all"):
+def monthly_trend(range: str = "all", user_id: int = None):
+    
+    if user_id is None:
+        return {"error": "user_id required"}
 
     start_date = get_date_filter(range)
 
@@ -435,19 +579,20 @@ def monthly_trend(range: str = "all"):
                 TO_CHAR(DATE_TRUNC('month', date), 'Mon-YY') AS month,
                 SUM(amount) AS total
             FROM transactions
-            WHERE date >= %s
+            WHERE user_id = %s AND date >= %s
             GROUP BY DATE_TRUNC('month', date)
             ORDER BY DATE_TRUNC('month', date)
-        """, (start_date,))
+        """, (user_id, start_date))
     else:
-        cursor.execute("""
+        cursor.execute("""          
             SELECT
                 TO_CHAR(DATE_TRUNC('month', date), 'Mon-YY') AS month,
                 SUM(amount) AS total
             FROM transactions
+            WHERE user_id = %s
             GROUP BY DATE_TRUNC('month', date)
             ORDER BY DATE_TRUNC('month', date)
-        """)
+        """, (user_id,))
 
     rows = cursor.fetchall()
 
@@ -464,18 +609,23 @@ def monthly_trend(range: str = "all"):
 # INSIGHTS ENGINE
 # ---------------------------------------------------
 @app.get("/insights")
-def get_insights(range: str = "all"):
+def get_insights(range: str = "all", user_id: int = None):      
+
+    if user_id is None:
+        return {"error": "user_id required"}
 
     insights = []
 
     start_date = get_date_filter(range)
 
-    where_clause = ""
-    params = ()
+    where_clause = "WHERE user_id = %s"
+    params = [user_id]
 
     if start_date:
-        where_clause = "WHERE date >= %s"
-        params = (start_date,)
+        where_clause += " AND date >= %s"
+        params.append(start_date)
+
+    params = tuple(params)
 
     # --------------------------------------------------
     # Income + Expense
@@ -524,24 +674,24 @@ def get_insights(range: str = "all"):
     # Top Category
     # --------------------------------------------------
     if start_date:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT category, ABS(SUM(amount)) total
             FROM transactions
-            WHERE amount < 0
+            {where_clause} AND amount < 0
             AND date >= %s
             GROUP BY category
             ORDER BY total DESC
             LIMIT 1
         """, params)
     else:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT category, ABS(SUM(amount)) total
             FROM transactions
-            WHERE amount < 0
+            {where_clause} AND amount < 0
             GROUP BY category
             ORDER BY total DESC
             LIMIT 1
-        """)
+        """, params)
 
     row = cursor.fetchone()
 
@@ -554,24 +704,24 @@ def get_insights(range: str = "all"):
     # Top Merchants
     # --------------------------------------------------
     if start_date:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT description, ABS(SUM(amount)) total
             FROM transactions
-            WHERE amount < 0
+            {where_clause} AND amount < 0
             AND date >= %s
             GROUP BY description
             ORDER BY total DESC
             LIMIT 3
         """, params)
     else:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT description, ABS(SUM(amount)) total
             FROM transactions
-            WHERE amount < 0
+            {where_clause} AND amount < 0
             GROUP BY description
             ORDER BY total DESC
             LIMIT 3
-        """)
+        """, params)
 
     rows = cursor.fetchall()
 
@@ -586,22 +736,22 @@ def get_insights(range: str = "all"):
     # Largest Single Expense
     # --------------------------------------------------
     if start_date:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT description, ABS(amount)
             FROM transactions
-            WHERE amount < 0
+            {where_clause} AND amount < 0
             AND date >= %s
             ORDER BY ABS(amount) DESC
             LIMIT 1
         """, params)
     else:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT description, ABS(amount)
             FROM transactions
-            WHERE amount < 0
+            {where_clause} AND amount < 0
             ORDER BY ABS(amount) DESC
             LIMIT 1
-        """)
+        """, params)
 
     row = cursor.fetchone()
 
@@ -614,20 +764,22 @@ def get_insights(range: str = "all"):
     # Weekend Spending
     # --------------------------------------------------
     if start_date:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COALESCE(ABS(SUM(amount)),0)
             FROM transactions
-            WHERE amount < 0
+            {where_clause}
+            AND amount < 0
             AND EXTRACT(DOW FROM date) IN (0,6)
             AND date >= %s
         """, params)
     else:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COALESCE(ABS(SUM(amount)),0)
             FROM transactions
-            WHERE amount < 0
+            {where_clause}
+            AND amount < 0
             AND EXTRACT(DOW FROM date) IN (0,6)
-        """)
+        """, params)
 
     row = cursor.fetchone()
 
@@ -645,26 +797,28 @@ def get_insights(range: str = "all"):
     # Average Monthly Spend
     # --------------------------------------------------
     if start_date:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT AVG(month_total)
             FROM (
                 SELECT ABS(SUM(amount)) AS month_total
                 FROM transactions
-                WHERE amount < 0
+                {where_clause}
+                AND amount < 0
                 AND date >= %s
                 GROUP BY DATE_TRUNC('month', date)
             ) t
         """, params)
     else:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT AVG(month_total)
             FROM (
                 SELECT ABS(SUM(amount)) AS month_total
                 FROM transactions
-                WHERE amount < 0
+                {where_clause}
+                AND amount < 0
                 GROUP BY DATE_TRUNC('month', date)
             ) t
-        """)
+        """, params)
 
     row = cursor.fetchone()
 
