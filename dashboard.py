@@ -3,8 +3,6 @@ import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from main import safe_number
-
 BASE_URL = "http://127.0.0.1:8000"
 
 # ---------------------------------------------------
