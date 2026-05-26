@@ -61,9 +61,8 @@ if not st.session_state.logged_in:
                 st.rerun()
 
             else:
-                st.error(
-                    data.get("error", "Login failed")
-                )
+                st.error(f"Login failed: {response.status_code}")
+                st.error(response.text)
 
     # SIGNUP
     with auth_tab2:
