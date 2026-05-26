@@ -3,7 +3,13 @@ import requests
 import pandas as pd
 import matplotlib.pyplot as plt
 
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = "https://expense-intelligence-platform.onrender.com"
+
+def safe_number(value):
+    try:
+        return float(value or 0)
+    except:
+        return 0
 
 # ---------------------------------------------------
 # SESSION STATE
