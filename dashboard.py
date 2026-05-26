@@ -116,51 +116,6 @@ if st.sidebar.button("Logout"):
     st.rerun()
 
 # -------------------------------------------------
-# DELETE TRANSACTIONS
-# -------------------------------------------------
-if st.button("🗑 Delete My Transactions"):
-
-    response = requests.delete(
-        f"{BASE_URL}/delete-transactions",
-        params={"user_id": st.session_state.user_id}
-    )
-
-    if response.status_code == 200:
-        st.success("All transactions deleted")
-        st.rerun()
-    else:
-        st.error("Failed to delete transactions")
-        
-# -------------------------------------------------
-# ACCOUNT DELETION
-# -------------------------------------------------
-st.warning("Danger Zone")
-
-confirm = st.checkbox(
-    "I understand this will permanently delete my account"
-)
-
-if confirm:
-    if st.button("❌ Delete My Account"):
-
-        response = requests.delete(
-            f"{BASE_URL}/delete-account",
-            params={"user_id": st.session_state.user_id}
-        )
-
-        if response.status_code == 200:
-            st.success("Account deleted successfully")
-
-            st.session_state.logged_in = False
-            st.session_state.user_id = None
-            st.session_state.user_name = None
-
-            st.rerun()
-
-        else:
-            st.error("Failed to delete account")
-
-# -------------------------------------------------
 # PAGE CONFIG
 # -------------------------------------------------
 st.set_page_config(
@@ -178,8 +133,53 @@ section[data-testid="stSidebar"] {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("💰 Expense Intelligence Platform")
-st.caption("Track spending. Detect patterns. Improve savings.")
+title_col, actions_col = st.columns([0.78, 0.22])
+
+with title_col:
+    st.title("💰 Expense Intelligence Platform")
+    st.caption("Track spending. Detect patterns. Improve savings.")
+
+with actions_col:
+    with st.expander("⚙ Actions"):
+        if st.button("Delete Txn", key="delete_transactions_action"):
+
+            response = requests.delete(
+                f"{BASE_URL}/delete-transactions",
+                params={"user_id": st.session_state.user_id}
+            )
+
+            if response.status_code == 200:
+                st.success("All transactions deleted")
+                st.rerun()
+            else:
+                st.error("Failed to delete transactions")
+
+        st.warning("Danger Zone")
+
+        confirm = st.checkbox(
+            "I understand this will permanently delete my account",
+            key="confirm_delete_account_action"
+        )
+
+        if confirm:
+            if st.button("Delete Account", key="delete_account_action"):
+
+                response = requests.delete(
+                    f"{BASE_URL}/delete-account",
+                    params={"user_id": st.session_state.user_id}
+                )
+
+                if response.status_code == 200:
+                    st.success("Account deleted successfully")
+
+                    st.session_state.logged_in = False
+                    st.session_state.user_id = None
+                    st.session_state.user_name = None
+
+                    st.rerun()
+
+                else:
+                    st.error("Failed to delete account")
 
 # -------------------------------------------------
 # SIDEBAR FILTERS
