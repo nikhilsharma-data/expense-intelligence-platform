@@ -50,7 +50,15 @@ if not st.session_state.logged_in:
                 }
             )
 
-            data = response.json()
+            print("Status:", response.status_code)
+            print("Raw Response:", response.text)
+
+            if response.status_code == 200:
+                data = response.json()
+            else:
+                st.error(f"Status Code: {response.status_code}")
+                st.error(response.text)
+                st.stop()
 
             if data.get("status") == "success":
                 st.session_state.logged_in = True

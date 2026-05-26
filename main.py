@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
-from db import conn, cursor
+from db import get_db_connection
 import pdfplumber
 import re
 from pydantic import BaseModel
@@ -12,6 +12,9 @@ app = FastAPI(title="Expense Intelligence API")
 # ---------------------------------------
 # ✅ ADD THIS BLOCK HERE (ONCE)
 # ---------------------------------------
+conn = get_db_connection()
+cursor = conn.cursor()
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS transactions (
     id SERIAL PRIMARY KEY,
@@ -163,6 +166,9 @@ def root():
 # ---------------------------------------------------
 @app.post("/signup")
 def signup(user: SignupRequest):
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
     try:
         cursor.execute(
@@ -204,6 +210,10 @@ def signup(user: SignupRequest):
     except Exception as e:
         conn.rollback()
         return {"error": str(e)}
+    
+    finally:
+        cursor.close()
+        conn.close()
 
 # ---------------------------------------------------
 # LOGIN
@@ -211,6 +221,9 @@ def signup(user: SignupRequest):
 @app.post("/login")
 def login(user: LoginRequest):
 
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
     try:
         cursor.execute("""
             SELECT id, name, password_hash
@@ -246,6 +259,10 @@ def login(user: LoginRequest):
     except Exception as e:
         conn.rollback()
         return {"error": str(e)}
+    
+    finally:
+        cursor.close()
+        conn.close()
 
 # ---------------------------------------------------
 # UPLOAD CSV
@@ -257,6 +274,9 @@ async def upload_file(
 ):
     
     print("UPLOAD API HIT")
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()      
 
     try:
 
@@ -445,6 +465,10 @@ async def upload_file(
         conn.rollback()
 
         raise e
+    
+    finally:
+        cursor.close()
+        conn.close()
 
 # ---------------------------------------------------
 # DELETE TRANSACTIONS 
@@ -452,13 +476,24 @@ async def upload_file(
 @app.delete("/delete-transactions")
 def delete_transactions(user_id: int):
 
-    cursor.execute(
-        "DELETE FROM transactions WHERE user_id = %s",
-        (user_id,)
-    )
-    conn.commit()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(
+            "DELETE FROM transactions WHERE user_id = %s",
+            (user_id,)
+        )
+        conn.commit()
+        return {"message": "Transactions deleted successfully"}
 
-    return {"message": "Transactions deleted successfully"}
+    except Exception as e:
+        conn.rollback()
+        return {"error": str(e)}
+    
+    finally:
+        cursor.close()
+        conn.close()
 
 # ---------------------------------------------------
 # DELETE ACCOUNT (and transactions)
@@ -466,135 +501,177 @@ def delete_transactions(user_id: int):
 @app.delete("/delete-account")
 def delete_account(user_id: int):
 
-    # delete transactions first
-    cursor.execute(
-        "DELETE FROM transactions WHERE user_id = %s",
-        (user_id,)
-    )
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-    # delete user account
-    cursor.execute(
-        "DELETE FROM users WHERE id = %s",
-        (user_id,)
-    )
+    try:
+        # delete transactions first
+        cursor.execute(
+            "DELETE FROM transactions WHERE user_id = %s",
+            (user_id,)
+        )
 
-    conn.commit()
+        # delete user account
+        cursor.execute(
+            "DELETE FROM users WHERE id = %s",
+            (user_id,)
+        )
 
-    return {"message": "Account deleted successfully"}
+        conn.commit()
+        return {"message": "Account deleted successfully"}
+
+    except Exception as e:
+        conn.rollback()
+        return {"error": str(e)}
+
+    finally:
+        cursor.close()
+        conn.close()
 
 # ---------------------------------------------------
 # SUMMARY
 # ---------------------------------------------------
 @app.get("/summary")
 def get_summary(range: str = "all", user_id: int = None):
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-    if user_id is None:
-        return {"error": "user_id required"}
+    try:
+        if user_id is None:
+            return {"error": "user_id required"}
 
-    start_date = get_date_filter(range)
+        start_date = get_date_filter(range)
 
-    if start_date:
-        cursor.execute("""
-        SELECT
-            COALESCE(SUM(amount),0),
-            COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END),0),
-            COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),0)
-        FROM transactions
-        WHERE user_id = %s AND date >= %s
-    """, (user_id, start_date))
-    else:
-        cursor.execute("""
-        SELECT
-            COALESCE(SUM(amount),0),
-            COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END),0),
-            COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),0)
-        FROM transactions
-        WHERE user_id = %s
-    """, (user_id,))
+        if start_date:
+            cursor.execute("""
+            SELECT
+                COALESCE(SUM(amount),0),
+                COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),0)
+            FROM transactions
+            WHERE user_id = %s AND date >= %s
+        """, (user_id, start_date))
+        else:
+            cursor.execute("""
+            SELECT
+                COALESCE(SUM(amount),0),
+                COALESCE(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),0)
+            FROM transactions
+            WHERE user_id = %s
+        """, (user_id,))
 
-    result = cursor.fetchone()
+        result = cursor.fetchone()
 
-    total = safe_number(result[0])
-    expense = abs(safe_number(result[1]))
-    income = safe_number(result[2])
+        total = safe_number(result[0])
+        expense = abs(safe_number(result[1]))
+        income = safe_number(result[2])
 
-    savings_pct = (total / income * 100) if income > 0 else 0
+        savings_pct = (total / income * 100) if income > 0 else 0
 
-    return {
-        "total": total,
-        "total_expense": expense,
-        "total_income": income,
-        "savings_percent": round(savings_pct, 1)
-    }
+        return {
+            "total": total,
+            "total_expense": expense,
+            "total_income": income,
+            "savings_percent": round(savings_pct, 1)
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+    finally:
+        cursor.close()
+        conn.close()
 
 # ---------------------------------------------------
 # TRANSACTION
 # ---------------------------------------------------
 @app.get("/transactions")
 def get_transactions(user_id: int):
-
     if user_id is None:
         return {"error": "user_id required"}
 
-    cursor.execute("""
-        SELECT date, description, amount, category
-        FROM transactions
-        WHERE user_id = %s
-        ORDER BY date DESC
-    """, (user_id,))
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-    rows = cursor.fetchall()
+    try:
+        cursor.execute("""
+            SELECT date, description, amount, category
+            FROM transactions
+            WHERE user_id = %s
+            ORDER BY date DESC
+        """, (user_id,))
 
-    transactions = []
+        rows = cursor.fetchall()
 
-    for row in rows:
-        transactions.append({
-            "date": str(row[0]),
-            "description": row[1],
-            "amount": row[2],
-            "category": row[3]
-        })
+        transactions = []
 
-    return transactions
+        for row in rows:
+            transactions.append({
+                "date": str(row[0]),
+                "description": row[1],
+                "amount": row[2],
+                "category": row[3]
+            })
+
+        return transactions
+
+    except Exception as e:
+        return {"error": str(e)}
+
+    finally:
+        cursor.close()
+        conn.close()
 
 # ---------------------------------------------------
 # CATEGORY BREAKDOWN
 # ---------------------------------------------------
 @app.get("/category-breakdown")
 def category_breakdown(range: str = "all", user_id: int = None):
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
     if user_id is None:
         return {"error": "user_id required"}
 
     start_date = get_date_filter(range)
 
-    if start_date:
-        cursor.execute("""
-            SELECT category, ABS(SUM(amount)) AS total
-            FROM transactions
-            WHERE user_id = %s AND amount < 0
-            AND date >= %s
-            GROUP BY category
-            ORDER BY total DESC
-        """, (user_id, start_date))
-    else:
-        cursor.execute("""
-            SELECT category, ABS(SUM(amount)) AS total
-            FROM transactions
-            WHERE user_id = %s AND amount < 0
-            GROUP BY category
-            ORDER BY total DESC
-        """, (user_id,))
+    try:
+        if start_date:
+            cursor.execute("""
+                SELECT category, ABS(SUM(amount)) AS total
+                FROM transactions
+                WHERE user_id = %s AND amount < 0
+                AND date >= %s
+                GROUP BY category
+                ORDER BY total DESC
+            """, (user_id, start_date))
+        else:
+            cursor.execute("""
+                SELECT category, ABS(SUM(amount)) AS total
+                FROM transactions
+                WHERE user_id = %s AND amount < 0
+                GROUP BY category
+                ORDER BY total DESC
+            """, (user_id,))
 
-    rows = cursor.fetchall()
+        rows = cursor.fetchall()
 
-    return [
-        {
-            "category": r[0],
-            "total": safe_number(r[1])
-        }
-        for r in rows
-    ]
+        return [
+            {
+                "category": r[0],
+                "total": safe_number(r[1])
+            }
+            for r in rows
+        ]
+
+    except Exception as e:
+        return {"error": str(e)}
+
+    finally:
+        cursor.close()
+        conn.close()
 
 
 # ---------------------------------------------------
@@ -603,13 +680,16 @@ def category_breakdown(range: str = "all", user_id: int = None):
 @app.get("/monthly-trend")
 def monthly_trend(range: str = "all", user_id: int = None):
     
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
     if user_id is None:
         return {"error": "user_id required"}
 
     start_date = get_date_filter(range)
-
-    if start_date:
-        cursor.execute("""
+    try:
+        if start_date:
+            cursor.execute("""
             SELECT
                 TO_CHAR(DATE_TRUNC('month', date), 'Mon-YY') AS month,
                 SUM(amount) AS total
@@ -618,8 +698,8 @@ def monthly_trend(range: str = "all", user_id: int = None):
             GROUP BY DATE_TRUNC('month', date)
             ORDER BY DATE_TRUNC('month', date)
         """, (user_id, start_date))
-    else:
-        cursor.execute("""          
+        else:
+            cursor.execute("""          
             SELECT
                 TO_CHAR(DATE_TRUNC('month', date), 'Mon-YY') AS month,
                 SUM(amount) AS total
@@ -629,96 +709,92 @@ def monthly_trend(range: str = "all", user_id: int = None):
             ORDER BY DATE_TRUNC('month', date)
         """, (user_id,))
 
-    rows = cursor.fetchall()
+        rows = cursor.fetchall()
 
-    return [
-        {
-            "month": r[0],
-            "total": safe_number(r[1])
-        }
-        for r in rows
-    ]
+        return [
+            {
+                "month": r[0],
+                "total": safe_number(r[1])
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        cursor.close()
+        conn.close()
 
 
 # ---------------------------------------------------
 # INSIGHTS ENGINE
 # ---------------------------------------------------
 @app.get("/insights")
-def get_insights(range: str = "all", user_id: int = None):      
+def get_insights(range: str = "all", user_id: int = None):
 
-    if user_id is None:
-        return {"error": "user_id required"}
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-    insights = []
+    try:
+        if user_id is None:
+            return {"error": "user_id required"}
 
-    start_date = get_date_filter(range)
+        insights = []
+        start_date = get_date_filter(range)
 
-    where_clause = "WHERE user_id = %s"
-    params = [user_id]
+        where_clause = "WHERE user_id = %s"
+        params = [user_id]
 
-    if start_date:
-        where_clause += " AND date >= %s"
-        params.append(start_date)
+        if start_date:
+            where_clause += " AND date >= %s"
+            params.append(start_date)
 
-    params = tuple(params)
+        params = tuple(params)
 
-    # --------------------------------------------------
-    # Income + Expense
-    # --------------------------------------------------
-    cursor.execute(f"""
-        SELECT
-            COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),0),
-            COALESCE(ABS(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END)),0)
-        FROM transactions
-        {where_clause}
-    """, params)
-
-    income, expense = cursor.fetchone()
-
-    income = safe_number(income)
-    expense = safe_number(expense)
-
-    # --------------------------------------------------
-    # Savings Insight
-    # --------------------------------------------------
-    if income > 0:
-        savings = income - expense
-        ratio = (savings / income) * 100
-
-        if savings >= 0:
-            insights.append(
-                f"You saved ₹{savings:,.0f} this period ({ratio:.1f}% of income)"
-            )
-        else:
-            insights.append(
-                f"Warning: Overspent by ₹{abs(savings):,.0f}"
-            )
-
-    # --------------------------------------------------
-    # Spend Ratio Warning
-    # --------------------------------------------------
-    if income > 0:
-        spend_ratio = (expense / income) * 100
-
-        if spend_ratio > 80:
-            insights.append(
-                "Warning: You are spending more than 80% of income"
-            )
-
-    # --------------------------------------------------
-    # Top Category
-    # --------------------------------------------------
-    if start_date:
+        # --------------------------------------------------
+        # Income + Expense
+        # --------------------------------------------------
         cursor.execute(f"""
-            SELECT category, ABS(SUM(amount)) total
+            SELECT
+                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END),0),
+                COALESCE(ABS(SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END)),0)
             FROM transactions
-            {where_clause} AND amount < 0
-            AND date >= %s
-            GROUP BY category
-            ORDER BY total DESC
-            LIMIT 1
+            {where_clause}
         """, params)
-    else:
+
+        income, expense = cursor.fetchone()
+        income = safe_number(income)
+        expense = safe_number(expense)
+
+        # --------------------------------------------------
+        # Savings Insight
+        # --------------------------------------------------
+        if income > 0:
+            savings = income - expense
+            ratio = (savings / income) * 100
+
+            if savings >= 0:
+                insights.append(
+                    f"You saved Rs.{savings:,.0f} this period ({ratio:.1f}% of income)"
+                )
+            else:
+                insights.append(
+                    f"Warning: Overspent by Rs.{abs(savings):,.0f}"
+                )
+
+        # --------------------------------------------------
+        # Spend Ratio Warning
+        # --------------------------------------------------
+        if income > 0:
+            spend_ratio = (expense / income) * 100
+
+            if spend_ratio > 80:
+                insights.append(
+                    "Warning: You are spending more than 80% of income"
+                )
+
+        # --------------------------------------------------
+        # Top Category
+        # --------------------------------------------------
         cursor.execute(f"""
             SELECT category, ABS(SUM(amount)) total
             FROM transactions
@@ -728,122 +804,76 @@ def get_insights(range: str = "all", user_id: int = None):
             LIMIT 1
         """, params)
 
-    row = cursor.fetchone()
+        row = cursor.fetchone()
 
-    if row:
-        insights.append(
-            f"Highest expense category is {row[0]} (₹{row[1]:,.0f})"
-        )
-
-    # --------------------------------------------------
-    # Top Merchants
-    # --------------------------------------------------
-    if start_date:
-        cursor.execute(f"""
-            SELECT description, ABS(SUM(amount)) total
-            FROM transactions
-            {where_clause} AND amount < 0
-            AND date >= %s
-            GROUP BY description
-            ORDER BY total DESC
-            LIMIT 3
-        """, params)
-    else:
-        cursor.execute(f"""
-            SELECT description, ABS(SUM(amount)) total
-            FROM transactions
-            {where_clause} AND amount < 0
-            GROUP BY description
-            ORDER BY total DESC
-            LIMIT 3
-        """, params)
-
-    rows = cursor.fetchall()
-
-    if rows:
-        names = [r[0] for r in rows]
-
-        insights.append(
-            f"Top spending merchants: {', '.join(names)}"
-        )
-
-    # --------------------------------------------------
-    # Largest Single Expense
-    # --------------------------------------------------
-    if start_date:
-        cursor.execute(f"""
-            SELECT description, ABS(amount)
-            FROM transactions
-            {where_clause} AND amount < 0
-            AND date >= %s
-            ORDER BY ABS(amount) DESC
-            LIMIT 1
-        """, params)
-    else:
-        cursor.execute(f"""
-            SELECT description, ABS(amount)
-            FROM transactions
-            {where_clause} AND amount < 0
-            ORDER BY ABS(amount) DESC
-            LIMIT 1
-        """, params)
-
-    row = cursor.fetchone()
-
-    if row:
-        insights.append(
-            f"Largest single expense: {row[0]} (₹{row[1]:,.0f})"
-        )
-
-    # --------------------------------------------------
-    # Weekend Spending
-    # --------------------------------------------------
-    if start_date:
-        cursor.execute(f"""
-            SELECT COALESCE(ABS(SUM(amount)),0)
-            FROM transactions
-            {where_clause}
-            AND amount < 0
-            AND EXTRACT(DOW FROM date) IN (0,6)
-            AND date >= %s
-        """, params)
-    else:
-        cursor.execute(f"""
-            SELECT COALESCE(ABS(SUM(amount)),0)
-            FROM transactions
-            {where_clause}
-            AND amount < 0
-            AND EXTRACT(DOW FROM date) IN (0,6)
-        """, params)
-
-    row = cursor.fetchone()
-
-    weekend = safe_number(row[0]) if row else 0
-
-    if expense > 0:
-        pct = (weekend / expense) * 100
-
-        if pct > 35:
+        if row:
             insights.append(
-                f"Weekend spending is high ({pct:.1f}% of expenses)"
+                f"Highest expense category is {row[0]} (Rs.{row[1]:,.0f})"
             )
 
-    # --------------------------------------------------
-    # Average Monthly Spend
-    # --------------------------------------------------
-    if start_date:
+        # --------------------------------------------------
+        # Top Merchants
+        # --------------------------------------------------
         cursor.execute(f"""
-            SELECT AVG(month_total)
-            FROM (
-                SELECT ABS(SUM(amount)) AS month_total
-                FROM transactions
-                {where_clause}
-                AND amount < 0
-                AND date >= %s
-                GROUP BY DATE_TRUNC('month', date)
-            ) t
+            SELECT description, ABS(SUM(amount)) total
+            FROM transactions
+            {where_clause} AND amount < 0
+            GROUP BY description
+            ORDER BY total DESC
+            LIMIT 3
         """, params)
-    else:
+
+        rows = cursor.fetchall()
+
+        if rows:
+            names = [r[0] for r in rows]
+            insights.append(
+                f"Top spending merchants: {', '.join(names)}"
+            )
+
+        # --------------------------------------------------
+        # Largest Single Expense
+        # --------------------------------------------------
+        cursor.execute(f"""
+            SELECT description, ABS(amount)
+            FROM transactions
+            {where_clause} AND amount < 0
+            ORDER BY ABS(amount) DESC
+            LIMIT 1
+        """, params)
+
+        row = cursor.fetchone()
+
+        if row:
+            insights.append(
+                f"Largest single expense: {row[0]} (Rs.{row[1]:,.0f})"
+            )
+
+        # --------------------------------------------------
+        # Weekend Spending
+        # --------------------------------------------------
+        cursor.execute(f"""
+            SELECT COALESCE(ABS(SUM(amount)),0)
+            FROM transactions
+            {where_clause}
+            AND amount < 0
+            AND EXTRACT(DOW FROM date) IN (0,6)
+        """, params)
+
+        row = cursor.fetchone()
+        weekend = safe_number(row[0]) if row else 0
+
+        if expense > 0:
+            pct = (weekend / expense) * 100
+
+            if pct > 35:
+                insights.append(
+                    f"Weekend spending is high ({pct:.1f}% of expenses)"
+                )
+
+        # --------------------------------------------------
+        # Average Monthly Spend
+        # --------------------------------------------------
         cursor.execute(f"""
             SELECT AVG(month_total)
             FROM (
@@ -855,19 +885,25 @@ def get_insights(range: str = "all", user_id: int = None):
             ) t
         """, params)
 
-    row = cursor.fetchone()
+        row = cursor.fetchone()
+        avg_month = safe_number(row[0]) if row else 0
 
-    avg_month = safe_number(row[0]) if row else 0
+        if avg_month > 0:
+            insights.append(
+                f"Average monthly spend: Rs.{avg_month:,.0f}"
+            )
 
-    if avg_month > 0:
-        insights.append(
-            f"Average monthly spend: ₹{avg_month:,.0f}"
-        )
+        # --------------------------------------------------
+        # Fallback
+        # --------------------------------------------------
+        if not insights:
+            insights.append("No insights available for selected period")
 
-    # --------------------------------------------------
-    # Fallback
-    # --------------------------------------------------
-    if not insights:
-        insights.append("No insights available for selected period")
+        return {"insights": insights}
 
-    return {"insights": insights}
+    except Exception as e:
+        return {"error": str(e)}
+
+    finally:
+        cursor.close()
+        conn.close()

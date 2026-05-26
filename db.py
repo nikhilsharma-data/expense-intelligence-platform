@@ -4,7 +4,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-conn = psycopg2.connect(
+def get_db_connection():
+    conn = psycopg2.connect(
     dbname=os.getenv("DB_NAME"),
     user=os.getenv("DB_USER"),
     password=os.getenv("DB_PASSWORD"),
@@ -12,5 +13,4 @@ conn = psycopg2.connect(
     port=os.getenv("DB_PORT"),
     sslmode='require'
 )
-
-cursor = conn.cursor()
+    return conn
