@@ -519,19 +519,8 @@ with tab3:
 
             if response.status_code == 200:
 
-                result = response.json()
-
                 st.success("PDF uploaded successfully!")
-
-                extracted_text = result.get("preview", "")
-                transactions = result.get("transactions", [])
-
-                # ==============================
-                # Transaction Count
-                # ==============================
-                st.info(
-                    f"Transactions detected: {len(transactions)}"
-            )
+                st.rerun()
 
                 # ==============================
                 # Empty PDF Detection
