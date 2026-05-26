@@ -446,6 +446,41 @@ async def upload_file(
 
         raise e
 
+# ---------------------------------------------------
+# DELETE TRANSACTIONS 
+# ---------------------------------------------------
+@app.delete("/delete-transactions")
+def delete_transactions(user_id: int):
+
+    cursor.execute(
+        "DELETE FROM transactions WHERE user_id = %s",
+        (user_id,)
+    )
+    conn.commit()
+
+    return {"message": "Transactions deleted successfully"}
+
+# ---------------------------------------------------
+# DELETE ACCOUNT (and transactions)
+# ---------------------------------------------------
+@app.delete("/delete-account")
+def delete_account(user_id: int):
+
+    # delete transactions first
+    cursor.execute(
+        "DELETE FROM transactions WHERE user_id = %s",
+        (user_id,)
+    )
+
+    # delete user account
+    cursor.execute(
+        "DELETE FROM users WHERE id = %s",
+        (user_id,)
+    )
+
+    conn.commit()
+
+    return {"message": "Account deleted successfully"}
 
 # ---------------------------------------------------
 # SUMMARY
