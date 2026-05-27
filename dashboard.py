@@ -206,6 +206,8 @@ if "processed_upload_key" not in st.session_state:
     st.session_state.processed_upload_key = None
 if "upload_notice" not in st.session_state:
     st.session_state.upload_notice = None
+if "action_notice" not in st.session_state:
+    st.session_state.action_notice = None
 
 # ---------------------------------------------------
 # LOGIN / SIGNUP
@@ -345,6 +347,7 @@ with st.sidebar:
         st.session_state.user_name = None
         st.session_state.processed_upload_key = None
         st.session_state.upload_notice = None
+        st.session_state.action_notice = None
         st.rerun()
 
 # ---------------------------------------------------
@@ -384,6 +387,10 @@ has_data = bool(
         or safe_number(summary.get("total_expense", 0)) > 0
     )
 )
+
+if st.session_state.action_notice:
+    st.success(st.session_state.action_notice)
+    st.session_state.action_notice = None
 
 # ---------------------------------------------------
 # TABS
@@ -593,33 +600,42 @@ with tab3:
             else:
                 st.info("This file has already been processed.")
         else:
-            files = {
-                "file": (
-                    uploaded_file.name,
-                    file_bytes,
-                    "text/csv" if file_type == "csv" else "application/pdf",
-                )
-            }
-            with st.spinner("Processing statement..."):
-                response = requests.post(
-                    f"{BASE_URL}/upload",
-                    params={"user_id": st.session_state.user_id},
-                    files=files,
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    st.session_state.processed_upload_key = upload_key
+            if st.button("Process statement", key="process_statement", type="primary"):
+                files = {
+                    "file": (
+                        uploaded_file.name,
+                        file_bytes,
+                        "text/csv" if file_type == "csv" else "application/pdf",
+                    )
+                }
+                with st.spinner("Processing statement..."):
+                    response = requests.post(
+                        f"{BASE_URL}/upload",
+                        params={"user_id": st.session_state.user_id},
+                        files=files,
+                    )
+                    if response.status_code == 200:
+                        data = response.json()
+                        st.session_state.processed_upload_key = upload_key
 
-                    if file_type == "pdf" and "preview" in data and not data["preview"].strip():
-                        st.session_state.upload_notice = (
-                            "File processed, but no readable text was found. The PDF may be scanned."
-                        )
+                        if (
+                            file_type == "pdf"
+                            and "preview" in data
+                            and not data["preview"].strip()
+                        ):
+                            st.session_state.upload_notice = (
+                                "File processed, but no readable text was found. The PDF may be scanned."
+                            )
+                        else:
+                            st.session_state.upload_notice = (
+                                "Statement processed successfully!"
+                            )
+
+                        st.rerun()
                     else:
-                        st.session_state.upload_notice = "Statement processed successfully!"
-
-                    st.rerun()
-                else:
-                    st.error(response_detail(response, "Upload failed"))
+                        st.error(
+                            response_detail(response, "Upload failed")
+                        )
 
     with st.expander("📥 Need a sample? Download our template"):
         sample_csv = """Date,Description,Amount
@@ -656,13 +672,13 @@ with tab4:
         )
         if confirm_txn:
             if st.button("Delete All Transactions", key="del_txn", type="primary"):
-                response = requests.delete(
-                    f"{BASE_URL}/delete-transactions",
-                    params={"user_id": st.session_state.user_id},
-                )
+                with st.spinner("Deleting transactions..."):
+                    response = requests.delete(
+                        f"{BASE_URL}/delete-transactions",
+                        params={"user_id": st.session_state.user_id},
+                    )
                 if response.status_code == 200:
-                    st.success("All transactions deleted.")
-                    st.session_state.processed_upload_key = None
+                    st.session_state.action_notice = "All transactions deleted."
                     st.session_state.upload_notice = None
                     st.rerun()
                 else:
@@ -684,16 +700,18 @@ with tab4:
         )
         if confirm_acct:
             if st.button("Delete My Account", key="del_acct", type="primary"):
-                response = requests.delete(
-                    f"{BASE_URL}/delete-account",
-                    params={"user_id": st.session_state.user_id},
-                )
+                with st.spinner("Deleting account..."):
+                    response = requests.delete(
+                        f"{BASE_URL}/delete-account",
+                        params={"user_id": st.session_state.user_id},
+                    )
                 if response.status_code == 200:
                     st.session_state.logged_in = False
                     st.session_state.user_id = None
                     st.session_state.user_name = None
                     st.session_state.processed_upload_key = None
                     st.session_state.upload_notice = None
+                    st.session_state.action_notice = None
                     st.success("Account deleted. Goodbye!")
                     st.rerun()
                 else:
