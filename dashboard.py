@@ -202,6 +202,10 @@ if "user_id" not in st.session_state:
     st.session_state.user_id = None
 if "user_name" not in st.session_state:
     st.session_state.user_name = None
+if "processed_upload_key" not in st.session_state:
+    st.session_state.processed_upload_key = None
+if "upload_notice" not in st.session_state:
+    st.session_state.upload_notice = None
 
 # ---------------------------------------------------
 # LOGIN / SIGNUP
@@ -212,14 +216,6 @@ if not st.session_state.logged_in:
     <style>
         .stApp {
             background: linear-gradient(135deg, #0E1117 0%, #1A1C23 100%);
-        }
-        .login-card {
-            background: rgba(30,30,36,0.7);
-            backdrop-filter: blur(20px);
-            border-radius: 24px;
-            padding: 48px 32px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-            border: 1px solid rgba(255,255,255,0.1);
         }
         .login-title {
             font-size: 32px;
@@ -237,7 +233,6 @@ if not st.session_state.logged_in:
 
     col1, col2, col3 = st.columns([1, 1.5, 1])
     with col2:
-        st.markdown('<div class="login-card">', unsafe_allow_html=True)
         st.markdown(
             '<div class="login-title">💰 Expense Intelligence</div>',
             unsafe_allow_html=True,
@@ -302,8 +297,6 @@ if not st.session_state.logged_in:
                     st.success("Account created! Please sign in.")
                 else:
                     st.error(response_detail(response, "Signup failed"))
-
-        st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 # ---------------------------------------------------
@@ -350,6 +343,8 @@ with st.sidebar:
         st.session_state.logged_in = False
         st.session_state.user_id = None
         st.session_state.user_name = None
+        st.session_state.processed_upload_key = None
+        st.session_state.upload_notice = None
         st.rerun()
 
 # ---------------------------------------------------
@@ -585,31 +580,46 @@ with tab3:
     )
     if uploaded_file:
         file_type = uploaded_file.name.split(".")[-1].lower()
-        files = {
-            "file": (
-                uploaded_file.name,
-                uploaded_file.getvalue(),
-                "text/csv" if file_type == "csv" else "application/pdf",
-            )
-        }
-        with st.spinner("Processing statement..."):
-            response = requests.post(
-                f"{BASE_URL}/upload",
-                params={"user_id": st.session_state.user_id},
-                files=files,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                if file_type == "pdf" and "preview" in data:
-                    if not data["preview"].strip():
-                        st.warning("⚠️ No readable text found - the PDF may be scanned.")
-                    else:
-                        st.success("✅ Statement processed successfully!")
-                else:
-                    st.success("✅ File uploaded!")
-                st.rerun()
+        file_bytes = uploaded_file.getvalue()
+        upload_key = (
+            st.session_state.user_id,
+            uploaded_file.name,
+            len(file_bytes),
+        )
+
+        if st.session_state.processed_upload_key == upload_key:
+            if st.session_state.upload_notice:
+                st.success(st.session_state.upload_notice)
             else:
-                st.error(response_detail(response, "Upload failed"))
+                st.info("This file has already been processed.")
+        else:
+            files = {
+                "file": (
+                    uploaded_file.name,
+                    file_bytes,
+                    "text/csv" if file_type == "csv" else "application/pdf",
+                )
+            }
+            with st.spinner("Processing statement..."):
+                response = requests.post(
+                    f"{BASE_URL}/upload",
+                    params={"user_id": st.session_state.user_id},
+                    files=files,
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    st.session_state.processed_upload_key = upload_key
+
+                    if file_type == "pdf" and "preview" in data and not data["preview"].strip():
+                        st.session_state.upload_notice = (
+                            "File processed, but no readable text was found. The PDF may be scanned."
+                        )
+                    else:
+                        st.session_state.upload_notice = "Statement processed successfully!"
+
+                    st.rerun()
+                else:
+                    st.error(response_detail(response, "Upload failed"))
 
     with st.expander("📥 Need a sample? Download our template"):
         sample_csv = """Date,Description,Amount
@@ -652,6 +662,8 @@ with tab4:
                 )
                 if response.status_code == 200:
                     st.success("All transactions deleted.")
+                    st.session_state.processed_upload_key = None
+                    st.session_state.upload_notice = None
                     st.rerun()
                 else:
                     st.error(response_detail(response, "Deletion failed"))
@@ -680,6 +692,8 @@ with tab4:
                     st.session_state.logged_in = False
                     st.session_state.user_id = None
                     st.session_state.user_name = None
+                    st.session_state.processed_upload_key = None
+                    st.session_state.upload_notice = None
                     st.success("Account deleted. Goodbye!")
                     st.rerun()
                 else:
