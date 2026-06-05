@@ -300,48 +300,257 @@ def parse_pdf_table_transactions(table):
     return transactions
 
 
+def has_keyword(desc: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in desc for keyword in keywords)
+
+
 def categorize(description: str) -> str:
-    desc = description.upper()
+    desc = " ".join(str(description or "").upper().split())
 
-    if (
-        "SALARY" in desc
-        or "NEFT CR" in desc
-        or "CASH DEP" in desc
-        or "CREDIT INTEREST" in desc
-        or "REV-" in desc
-        or "REVERSAL" in desc
-    ):
-        return "Income"
+    category_rules = [
+        (
+            "Income",
+            (
+                "SALARY",
+                "NEFT CR",
+                "IMPS FROM",
+                "CASH DEP",
+                "CREDIT INTEREST",
+                "INTEREST CAPITALISED",
+                "FREELANCE PAYMENT",
+                "REFUND",
+                "REV-",
+                "REVERSAL",
+            ),
+        ),
+        (
+            "Rent",
+            (
+                "RENT",
+                "HOUSE RENT",
+                "LANDLORD",
+            ),
+        ),
+        (
+            "Food",
+            (
+                "SWIGGY",
+                "ZOMATO",
+                "FOOD",
+                "FOODHUB",
+                "RESTAURANT",
+                "CAFE",
+                "DINING",
+                "EATERY",
+                "PIZZA",
+                "DOMINOS",
+                "MCDONALD",
+                "KFC",
+            ),
+        ),
+        (
+            "Groceries",
+            (
+                "GROCER",
+                "GROCERMART",
+                "MILK",
+                "BIG BAZAAR",
+                "DMART",
+                "D MART",
+                "SUPERMARKET",
+                "HYPERMARKET",
+                "RELIANCE FRESH",
+                "JIOMART",
+            ),
+        ),
+        (
+            "Transport",
+            (
+                "UBER",
+                "OLA",
+                "RAPIDO",
+                "METRO",
+                "RAILWAY",
+                "IRCTC",
+                "BUS",
+                "TAXI",
+                "CAB",
+                "FASTAG",
+                "TOLL",
+            ),
+        ),
+        (
+            "Fuel",
+            (
+                "FUEL",
+                "PETROL",
+                "DIESEL",
+                "FUELSTATION",
+                "HPCL",
+                "BPCL",
+                "IOCL",
+                "INDIAN OIL",
+                "PETROL PUMP",
+            ),
+        ),
+        (
+            "Utilities",
+            (
+                "ELECTRIC",
+                "ELECTRICBOARD",
+                "BILLPAY",
+                "BILL PAY",
+                "WATER",
+                "GAS",
+                "LPG",
+                "BROADBAND",
+                "INTERNET",
+                "MOBILEOPERATOR",
+                "RELIANCEJIO",
+                "JIO",
+                "AIRTEL",
+                "VODAFONE",
+                "VI ",
+                "POSTPAID",
+                "PREPAID",
+            ),
+        ),
+        (
+            "Healthcare",
+            (
+                "PHARMACY",
+                "MEDICAL",
+                "MEDICINE",
+                "HOSPITAL",
+                "CLINIC",
+                "DOCTOR",
+                "LAB",
+                "DIAGNOSTIC",
+                "HEALTH",
+            ),
+        ),
+        (
+            "Insurance",
+            (
+                "INSURE",
+                "INSURANCE",
+                "HOMEINSURE",
+                "ZENITHINSURE",
+            ),
+        ),
+        (
+            "Investments",
+            (
+                "SIP",
+                "MUTUAL FUND",
+                "MF ",
+                "ZERODHA",
+                "GROWW",
+                "UPSTOX",
+                "INVEST",
+                "NPS",
+                "PPF",
+                "FD ",
+                "FIXED DEPOSIT",
+            ),
+        ),
+        (
+            "Subscriptions",
+            (
+                "STREAMING",
+                "NETFLIX",
+                "SUBSCRIPTION",
+                "SPOTIFY",
+                "HOTSTAR",
+                "PRIME",
+                "YOUTUBE",
+                "APPLE.COM",
+                "GOOGLE PLAY",
+            ),
+        ),
+        (
+            "Shopping",
+            (
+                "AMAZON",
+                "FLIPKART",
+                "MYNTRA",
+                "SHOP",
+                "SHOPMART",
+                "MART",
+                "MALL",
+                "RETAIL",
+                "STORE",
+                "BAZAAR",
+            ),
+        ),
+        (
+            "EMI & Loans",
+            (
+                "EMI",
+                "LOAN",
+                "VEHICLELOAN",
+                "HOME LOAN",
+                "HL ",
+                "PERSONAL LOAN",
+            ),
+        ),
+        (
+            "Credit Card Payment",
+            (
+                "CREDITCARD",
+                "CREDIT CARD",
+                "CC9876",
+                "MOPSOTHDRCARD",
+            ),
+        ),
+        (
+            "Cash Withdrawal",
+            (
+                "ATM",
+                "ATL/",
+                "CASH WDL",
+                "CASH WITHDRAW",
+            ),
+        ),
+        (
+            "Vehicle",
+            (
+                "MOTOR",
+                "VEHICLE",
+                "APEX MOTORS",
+                "SERVICE CENTER",
+                "GARAGE",
+            ),
+        ),
+        (
+            "Transfers",
+            (
+                "UPI",
+                "PAYTM",
+                "PHONEPE",
+                "GPAY",
+                "GOOGLEPAY",
+                "IMPS",
+                "NEFT DR",
+                "RTGS",
+                "MB:",
+            ),
+        ),
+        (
+            "Bank Charges",
+            (
+                "CHARGE",
+                "FEE",
+                "PENALTY",
+                "MIN BAL",
+                "SMS ALERT",
+            ),
+        ),
+    ]
 
-    if "FOOD" in desc or "GROCER" in desc or "RESTAURANT" in desc:
-        return "Food"
-
-    if "FUEL" in desc or "PETROL" in desc:
-        return "Fuel"
-
-    if "EMI" in desc or "LOAN" in desc:
-        return "EMI"
-
-    if "ELECTRIC" in desc or "MOBILE" in desc or "BILLPAY" in desc:
-        return "Utilities"
-
-    if "INSURE" in desc:
-        return "Insurance"
-
-    if "SHOP" in desc or "MART" in desc:
-        return "Shopping"
-
-    if "STREAMING" in desc or "NETFLIX" in desc or "SUBSCRIPTION" in desc:
-        return "Subscription"
-
-    if "IMPS" in desc or "NEFT DR" in desc or "UPI" in desc:
-        return "Transfer"
-
-    if "CREDITCARD" in desc or "CARD" in desc:
-        return "Card Payment"
-
-    if "MOTOR" in desc or "VEHICLE" in desc:
-        return "Vehicle"
+    for category, keywords in category_rules:
+        if has_keyword(desc, keywords):
+            return category
 
     return "Others"
 
