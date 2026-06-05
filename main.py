@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from datetime import date, timedelta
 from io import BytesIO
 from typing import List, Optional
@@ -190,6 +191,115 @@ def build_date_clause(start_date):
     return "", ()
 
 
+PDF_LINE_TRANSACTION_RE = re.compile(
+    r"^(\d{2}[-/]\d{2}[-/]\d{4})\s+(.+?)\s+"
+    r"([\d,]+(?:\.\d{1,2})?)\((Dr|Cr)\)\s+"
+    r"[\d,]+(?:\.\d{1,2})?\((Dr|Cr)\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_money(value):
+    if value is None:
+        return None
+
+    cleaned = (
+        str(value)
+        .replace(",", "")
+        .replace("INR", "")
+        .replace("Rs.", "")
+        .replace("₹", "")
+        .strip()
+    )
+
+    if not cleaned:
+        return None
+
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def add_pdf_transaction(transactions, seen, date_str, description, amount):
+    if not date_str or not description or amount is None:
+        return
+
+    key = (str(date_str).strip(), str(description).strip(), round(float(amount), 2))
+    if key in seen:
+        return
+
+    seen.add(key)
+    transactions.append(
+        {
+            "date": key[0],
+            "description": key[1],
+            "amount": key[2],
+        }
+    )
+
+
+def parse_dr_cr_text_line(line):
+    match = PDF_LINE_TRANSACTION_RE.match(" ".join(str(line).split()))
+    if not match:
+        return None
+
+    date_str, description, amount_text, amount_type, _balance_type = match.groups()
+    amount = parse_money(amount_text)
+    if amount is None:
+        return None
+
+    if amount_type.lower() == "dr":
+        amount = -amount
+
+    return date_str, description, amount
+
+
+def parse_pdf_text_transactions(text):
+    transactions = []
+
+    for line in (text or "").splitlines():
+        parsed = parse_dr_cr_text_line(line)
+        if parsed:
+            transactions.append(parsed)
+
+    return transactions
+
+
+def parse_pdf_table_transactions(table):
+    transactions = []
+
+    for row in table[1:]:
+        cells = [str(cell).strip() if cell is not None else "" for cell in row]
+        cells = [cell for cell in cells if cell]
+
+        if not cells:
+            continue
+
+        parsed = parse_dr_cr_text_line(" ".join(cells))
+        if parsed:
+            transactions.append(parsed)
+            continue
+
+        if len(row) < 2:
+            continue
+
+        date_str = row[0]
+        description = row[1]
+        withdrawal = row[4] if len(row) > 4 else None
+        deposit = row[5] if len(row) > 5 else None
+
+        deposit_amount = parse_money(deposit)
+        withdrawal_amount = parse_money(withdrawal)
+
+        if deposit_amount is not None:
+            transactions.append((date_str, description, deposit_amount))
+        elif withdrawal_amount is not None:
+            transactions.append((date_str, description, -withdrawal_amount))
+
+    return transactions
+
+
 def categorize(description: str) -> str:
     desc = description.upper()
 
@@ -373,6 +483,7 @@ async def upload_file(
             pdf_bytes = await file.read()
             extracted_text = ""
             transactions = []
+            seen_transactions = set()
 
             with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
                 for page in pdf.pages:
@@ -381,6 +492,14 @@ async def upload_file(
                     if text:
                         extracted_text += text + "\n"
                         logger.debug("Page text length: %s", len(text))
+                        for date_str, description, amount in parse_pdf_text_transactions(text):
+                            add_pdf_transaction(
+                                transactions,
+                                seen_transactions,
+                                date_str,
+                                description,
+                                amount,
+                            )
                     else:
                         logger.debug("No text found on page")
 
@@ -391,29 +510,23 @@ async def upload_file(
                         if not table:
                             continue
 
-                        for row in table[1:]:
-                            try:
-                                date_str = row[0]
-                                description = row[1]
-                                withdrawal = row[4] if len(row) > 4 else None
-                                deposit = row[5] if len(row) > 5 else None
+                        for date_str, description, amount in parse_pdf_table_transactions(table):
+                            add_pdf_transaction(
+                                transactions,
+                                seen_transactions,
+                                date_str,
+                                description,
+                                amount,
+                            )
 
-                                if deposit and deposit.strip():
-                                    amount = float(deposit.replace(",", ""))
-                                elif withdrawal and withdrawal.strip():
-                                    amount = -float(withdrawal.replace(",", ""))
-                                else:
-                                    continue
-
-                                transactions.append(
-                                    {
-                                        "date": date_str,
-                                        "description": description,
-                                        "amount": amount,
-                                    }
-                                )
-                            except Exception as exc:
-                                logger.warning("Skipping row: %s - %s", row, exc)
+            if not transactions:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "No transactions were found in this PDF. "
+                        "Please upload a text-based statement or CSV file."
+                    ),
+                )
 
             cur.execute("DELETE FROM transactions WHERE user_id = %s", (user_id,))
 
