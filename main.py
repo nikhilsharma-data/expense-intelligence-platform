@@ -8,7 +8,7 @@ from typing import List, Optional
 import bcrypt
 import pandas as pd
 import pdfplumber
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -17,8 +17,13 @@ from db import get_db_connection
 # -------------------------------
 # Configuration
 # -------------------------------
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    if origin.strip()
+]
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10")) * 1024 * 1024
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -168,6 +173,21 @@ def startup_db():
 # -------------------------------
 def safe_number(val):
     return float(val) if val is not None else 0.0
+
+
+def validate_required_text(value: str, field_name: str, min_length: int = 1):
+    if not value or len(value.strip()) < min_length:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must be at least {min_length} character(s)",
+        )
+
+
+def normalize_email(email: str) -> str:
+    email = (email or "").strip().lower()
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="A valid email address is required")
+    return email
 
 
 def get_date_filter(range_value: str) -> Optional[date]:
@@ -583,9 +603,13 @@ def root():
 @app.post("/signup", response_model=SignupResponse)
 def signup(user: SignupRequest, db=Depends(get_db)):
     conn, cur = db
+    name = user.name.strip()
+    email = normalize_email(user.email)
+    validate_required_text(name, "Name", min_length=2)
+    validate_required_text(user.password, "Password", min_length=6)
 
     try:
-        cur.execute("SELECT id FROM users WHERE email = %s", (user.email,))
+        cur.execute("SELECT id FROM users WHERE email = %s", (email,))
 
         if cur.fetchone():
             raise HTTPException(status_code=409, detail="Email already registered")
@@ -596,12 +620,12 @@ def signup(user: SignupRequest, db=Depends(get_db)):
             INSERT INTO users (name, email, password_hash)
             VALUES (%s, %s, %s) RETURNING id
             """,
-            (user.name, user.email, hashed_pw),
+            (name, email, hashed_pw),
         )
         user_id = cur.fetchone()[0]
         conn.commit()
 
-        logger.info("New user signed up: %s (id=%s)", user.email, user_id)
+        logger.info("New user signed up: %s (id=%s)", email, user_id)
         return {"status": "success", "user_id": user_id}
 
     except HTTPException:
@@ -616,11 +640,13 @@ def signup(user: SignupRequest, db=Depends(get_db)):
 @app.post("/login", response_model=LoginResponse)
 def login(user: LoginRequest, db=Depends(get_db)):
     conn, cur = db
+    email = normalize_email(user.email)
+    validate_required_text(user.password, "Password")
 
     try:
         cur.execute(
             "SELECT id, name, password_hash FROM users WHERE email = %s",
-            (user.email,),
+            (email,),
         )
         row = cur.fetchone()
 
@@ -632,7 +658,7 @@ def login(user: LoginRequest, db=Depends(get_db)):
         if not verify_password(user.password, stored_hash):
             raise HTTPException(status_code=401, detail="Invalid password")
 
-        logger.info("User logged in: %s", user.email)
+        logger.info("User logged in: %s", email)
         return {"status": "success", "user_id": user_id, "name": name}
 
     except HTTPException:
@@ -648,7 +674,7 @@ def login(user: LoginRequest, db=Depends(get_db)):
 # -------------------------------
 @app.post("/upload", response_model=UploadResponse)
 async def upload_file(
-    user_id: int,
+    user_id: int = Query(..., gt=0),
     file: UploadFile = File(...),
     db=Depends(get_db),
 ):
@@ -656,6 +682,9 @@ async def upload_file(
     logger.info("Upload request from user %s: %s", user_id, file.filename)
 
     try:
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="Uploaded file must have a name")
+
         filename = file.filename.lower()
 
         if filename.endswith(".csv"):
@@ -690,6 +719,12 @@ async def upload_file(
 
         if filename.endswith(".pdf"):
             pdf_bytes = await file.read()
+            if len(pdf_bytes) > MAX_UPLOAD_SIZE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail="PDF file is too large for processing",
+                )
+
             extracted_text = ""
             transactions = []
             seen_transactions = set()
@@ -783,7 +818,7 @@ async def upload_file(
 # Data Management
 # -------------------------------
 @app.delete("/delete-transactions", response_model=StatusMessage)
-def delete_transactions(user_id: int, db=Depends(get_db)):
+def delete_transactions(user_id: int = Query(..., gt=0), db=Depends(get_db)):
     conn, cur = db
 
     try:
@@ -800,7 +835,7 @@ def delete_transactions(user_id: int, db=Depends(get_db)):
 
 
 @app.delete("/delete-account", response_model=StatusMessage)
-def delete_account(user_id: int, db=Depends(get_db)):
+def delete_account(user_id: int = Query(..., gt=0), db=Depends(get_db)):
     conn, cur = db
 
     try:
@@ -821,10 +856,11 @@ def delete_account(user_id: int, db=Depends(get_db)):
 # Analytics Endpoints
 # -------------------------------
 @app.get("/summary", response_model=SummaryOut)
-def get_summary(range: str = "all", user_id: int = None, db=Depends(get_db)):
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id required")
-
+def get_summary(
+    range: str = "all",
+    user_id: int = Query(..., gt=0),
+    db=Depends(get_db),
+):
     conn, cur = db
     start_date = get_date_filter(range)
     clause, extra_params = build_date_clause(start_date)
@@ -860,10 +896,7 @@ def get_summary(range: str = "all", user_id: int = None, db=Depends(get_db)):
 
 
 @app.get("/transactions", response_model=List[TransactionOut])
-def get_transactions(user_id: int, db=Depends(get_db)):
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id required")
-
+def get_transactions(user_id: int = Query(..., gt=0), db=Depends(get_db)):
     conn, cur = db
 
     try:
@@ -896,12 +929,9 @@ def get_transactions(user_id: int, db=Depends(get_db)):
 @app.get("/category-breakdown", response_model=List[CategoryOut])
 def category_breakdown(
     range: str = "all",
-    user_id: int = None,
+    user_id: int = Query(..., gt=0),
     db=Depends(get_db),
 ):
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id required")
-
     conn, cur = db
     start_date = get_date_filter(range)
     clause, extra_params = build_date_clause(start_date)
@@ -927,10 +957,11 @@ def category_breakdown(
 
 
 @app.get("/monthly-trend", response_model=List[TrendOut])
-def monthly_trend(range: str = "all", user_id: int = None, db=Depends(get_db)):
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id required")
-
+def monthly_trend(
+    range: str = "all",
+    user_id: int = Query(..., gt=0),
+    db=Depends(get_db),
+):
     conn, cur = db
     start_date = get_date_filter(range)
     clause, extra_params = build_date_clause(start_date)
@@ -957,10 +988,11 @@ def monthly_trend(range: str = "all", user_id: int = None, db=Depends(get_db)):
 
 
 @app.get("/insights", response_model=InsightResponse)
-def get_insights(range: str = "all", user_id: int = None, db=Depends(get_db)):
-    if user_id is None:
-        raise HTTPException(status_code=400, detail="user_id required")
-
+def get_insights(
+    range: str = "all",
+    user_id: int = Query(..., gt=0),
+    db=Depends(get_db),
+):
     conn, cur = db
     start_date = get_date_filter(range)
     clause, extra_params = build_date_clause(start_date)

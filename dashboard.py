@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 import plotly.express as px
 import requests
@@ -13,7 +15,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-BASE_URL = "https://expense-intelligence-platform.onrender.com"
+BASE_URL = (
+    os.getenv("EXPENSE_API_BASE_URL")
+    or st.secrets.get("EXPENSE_API_BASE_URL", None)
+    or "https://expense-intelligence-platform.onrender.com"
+).rstrip("/")
+REQUEST_TIMEOUT = 30
 
 # ---------------------------------------------------
 # PROFESSIONAL CUSTOM CSS
@@ -182,7 +189,11 @@ def response_detail(response, fallback):
 
 def safe_get(endpoint, default, params=None):
     try:
-        response = requests.get(f"{BASE_URL}/{endpoint}", params=params)
+        response = requests.get(
+            f"{BASE_URL}/{endpoint}",
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
         if response.status_code == 200:
             return response.json()
 
@@ -191,6 +202,23 @@ def safe_get(endpoint, default, params=None):
     except Exception as exc:
         st.error(f"Connection error: {exc}")
         return default
+
+
+def post_json(endpoint, payload):
+    return requests.post(
+        f"{BASE_URL}/{endpoint}",
+        json=payload,
+        timeout=REQUEST_TIMEOUT,
+    )
+
+
+def reset_session():
+    st.session_state.logged_in = False
+    st.session_state.user_id = None
+    st.session_state.user_name = None
+    st.session_state.processed_upload_key = None
+    st.session_state.upload_notice = None
+    st.session_state.action_notice = None
 
 
 # ---------------------------------------------------
@@ -236,7 +264,7 @@ if not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1, 1.5, 1])
     with col2:
         st.markdown(
-            '<div class="login-title">💰 Expense Intelligence</div>',
+            '<div class="login-title">Expense Intelligence</div>',
             unsafe_allow_html=True,
         )
 
@@ -251,13 +279,17 @@ if not st.session_state.logged_in:
             password = st.text_input(
                 "Password",
                 type="password",
-                placeholder="••••••••",
+                placeholder="Enter your password",
                 key="login_password",
             )
             if st.button("Sign In", key="login_btn", use_container_width=True):
-                response = requests.post(
-                    f"{BASE_URL}/login",
-                    json={"email": email, "password": password},
+                if not email.strip() or not password:
+                    st.error("Enter both email and password.")
+                    st.stop()
+
+                response = post_json(
+                    "login",
+                    {"email": email.strip(), "password": password},
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -287,11 +319,15 @@ if not st.session_state.logged_in:
                 key="signup_password",
             )
             if st.button("Create Account", key="signup_btn", use_container_width=True):
-                response = requests.post(
-                    f"{BASE_URL}/signup",
-                    json={
-                        "name": name,
-                        "email": signup_email,
+                if not name.strip() or not signup_email.strip() or len(signup_password) < 6:
+                    st.error("Enter a name, valid email, and password with at least 6 characters.")
+                    st.stop()
+
+                response = post_json(
+                    "signup",
+                    {
+                        "name": name.strip(),
+                        "email": signup_email.strip(),
                         "password": signup_password,
                     },
                 )
@@ -308,7 +344,7 @@ st.markdown(
     """
 <div class="top-bar">
     <h2>Expense Intelligence</h2>
-    <div style="color: #A0A4B0; font-size: 14px;">💰 Smart spending insights</div>
+    <div style="color: #A0A4B0; font-size: 14px;">Smart spending insights</div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -332,7 +368,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    st.markdown("**📅 Period**")
+    st.markdown("**Period**")
     date_range = st.selectbox(
         "",
         ["all", "30d", "90d", "ytd"],
@@ -341,13 +377,8 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-    if st.button("🚪 Logout", use_container_width=True):
-        st.session_state.logged_in = False
-        st.session_state.user_id = None
-        st.session_state.user_name = None
-        st.session_state.processed_upload_key = None
-        st.session_state.upload_notice = None
-        st.session_state.action_notice = None
+    if st.button("Logout", use_container_width=True):
+        reset_session()
         st.rerun()
 
 # ---------------------------------------------------
@@ -396,14 +427,14 @@ if st.session_state.action_notice:
 # TABS
 # ---------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs(
-    ["📊 Dashboard", "🧠 Insights", "📂 Upload", "⚙️ Settings"]
+    ["Dashboard", "Insights", "Upload", "Settings"]
 )
 
 # ==================== DASHBOARD TAB ====================
 with tab1:
     if not has_data:
         st.info(
-            "📭 No data yet. Upload a bank statement in the **Upload** tab to unlock insights."
+            "No data yet. Upload a bank statement in the **Upload** tab to unlock insights."
         )
     else:
         balance = safe_number(summary.get("total", 0))
@@ -416,9 +447,9 @@ with tab1:
             st.markdown(
                 f"""
             <div class="metric-card">
-                <div class="metric-icon">💼</div>
+                <div class="metric-icon">Balance</div>
                 <div class="metric-label">Total Balance</div>
-                <div class="metric-value">₹ {balance:,.0f}</div>
+                <div class="metric-value">Rs. {balance:,.0f}</div>
             </div>
             """,
                 unsafe_allow_html=True,
@@ -427,9 +458,9 @@ with tab1:
             st.markdown(
                 f"""
             <div class="metric-card">
-                <div class="metric-icon">📉</div>
+                <div class="metric-icon">Outflow</div>
                 <div class="metric-label">Expenses</div>
-                <div class="metric-value">₹ {expense:,.0f}</div>
+                <div class="metric-value">Rs. {expense:,.0f}</div>
                 <div class="metric-delta">{expense_ratio:.1f}% of income</div>
             </div>
             """,
@@ -439,9 +470,9 @@ with tab1:
             st.markdown(
                 f"""
             <div class="metric-card">
-                <div class="metric-icon">📈</div>
+                <div class="metric-icon">Inflow</div>
                 <div class="metric-label">Income</div>
-                <div class="metric-value">₹ {income:,.0f}</div>
+                <div class="metric-value">Rs. {income:,.0f}</div>
             </div>
             """,
                 unsafe_allow_html=True,
@@ -449,7 +480,7 @@ with tab1:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        st.markdown("### 📊 Category Breakdown")
+        st.markdown("### Category Breakdown")
         if categories:
             df = pd.DataFrame(categories)
             df["total"] = pd.to_numeric(df["total"], errors="coerce")
@@ -476,7 +507,7 @@ with tab1:
                     y="category",
                     orientation="h",
                     title="Spending by Category",
-                    labels={"total": "Amount (₹)", "category": ""},
+                    labels={"total": "Amount (Rs.)", "category": ""},
                     color="total",
                     color_continuous_scale="blues",
                 )
@@ -487,7 +518,7 @@ with tab1:
                 )
                 st.plotly_chart(fig_bar, use_container_width=True)
 
-                st.markdown("#### 🥧 Expense Distribution")
+                st.markdown("#### Expense Distribution")
                 pie_df = expense_df.nlargest(5, "total").copy()
                 rest = expense_df.iloc[5:]["total"].sum() if len(expense_df) > 5 else 0
                 if rest > 0:
@@ -505,7 +536,7 @@ with tab1:
 
                 csv = df.to_csv(index=False).encode("utf-8")
                 st.download_button(
-                    "⬇ Download Report",
+                    "Download Report",
                     csv,
                     file_name="category_report.csv",
                     mime="text/csv",
@@ -515,7 +546,7 @@ with tab1:
 
         st.markdown("---")
 
-        st.markdown("### 📈 Net Cashflow Trend")
+        st.markdown("### Net Cashflow Trend")
         if trend:
             trend_df = pd.DataFrame(trend)
             trend_df["total"] = pd.to_numeric(trend_df["total"], errors="coerce")
@@ -524,7 +555,7 @@ with tab1:
                 x="month",
                 y="total",
                 title="Monthly balance movement",
-                labels={"month": "Month", "total": "Net Cashflow (₹)"},
+                labels={"month": "Month", "total": "Net Cashflow (Rs.)"},
             )
             fig_trend.update_layout(template="plotly_dark", font_family="Inter")
             st.plotly_chart(fig_trend, use_container_width=True)
@@ -533,7 +564,7 @@ with tab1:
 
 # ==================== INSIGHTS TAB ====================
 with tab2:
-    st.markdown("### 🧠 Smart Insights")
+    st.markdown("### Smart Insights")
     if insights.get("insights"):
         for item in insights["insights"]:
             text = item.lower()
@@ -547,16 +578,16 @@ with tab2:
         st.info("Upload transactions to unlock AI-powered insights.")
 
     st.markdown("---")
-    st.markdown("### 📋 Transaction History")
+    st.markdown("### Transaction History")
     if transactions:
         txn_df = pd.DataFrame(transactions)
         txn_df["amount"] = pd.to_numeric(txn_df["amount"], errors="coerce").fillna(0)
         txn_df["type"] = txn_df["amount"].apply(lambda x: "Credit" if x > 0 else "Debit")
         txn_df["display_amount"] = txn_df["amount"].apply(
-            lambda x: f"+₹ {x:,.0f}" if x > 0 else f"-₹ {abs(x):,.0f}"
+            lambda x: f"+Rs. {x:,.0f}" if x > 0 else f"-Rs. {abs(x):,.0f}"
         )
 
-        search = st.text_input("🔍 Search by description")
+        search = st.text_input("Search by description")
         if search:
             txn_df = txn_df[
                 txn_df["description"].str.contains(search, case=False, na=False)
@@ -568,7 +599,7 @@ with tab2:
 
         csv = txn_df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "⬇ Export Transactions",
+            "Export Transactions",
             csv,
             file_name="transactions.csv",
             mime="text/csv",
@@ -578,7 +609,7 @@ with tab2:
 
 # ==================== UPLOAD TAB ====================
 with tab3:
-    st.markdown("### 📂 Upload Statement")
+    st.markdown("### Upload Statement")
     st.markdown("Supports CSV and PDF bank statements. Maximum 5,000 rows recommended.")
 
     uploaded_file = st.file_uploader(
@@ -613,6 +644,7 @@ with tab3:
                         f"{BASE_URL}/upload",
                         params={"user_id": st.session_state.user_id},
                         files=files,
+                        timeout=REQUEST_TIMEOUT,
                     )
                     if response.status_code == 200:
                         data = response.json()
@@ -637,7 +669,7 @@ with tab3:
                             response_detail(response, "Upload failed")
                         )
 
-    with st.expander("📥 Need a sample? Download our template"):
+    with st.expander("Need a sample? Download the template"):
         sample_csv = """Date,Description,Amount
 2026-01-01,Salary,60000
 2026-01-02,Rent,-18000
@@ -652,7 +684,7 @@ with tab3:
 
 # ==================== SETTINGS TAB ====================
 with tab4:
-    st.markdown("### ⚙️ Account Settings")
+    st.markdown("### Account Settings")
     st.markdown("Manage your data and account.")
 
     col1, col2 = st.columns(2)
@@ -660,7 +692,7 @@ with tab4:
         st.markdown(
             """
         <div style="background: #1E1E24; border-radius:16px; padding:24px; border:1px solid #2A2D36;">
-            <h4 style="margin-top:0;">🗑️ Delete Transactions</h4>
+            <h4 style="margin-top:0;">Delete Transactions</h4>
             <p style="color:#A0A4B0;">Remove all uploaded statements and their data.</p>
         </div>
         """,
@@ -676,6 +708,7 @@ with tab4:
                     response = requests.delete(
                         f"{BASE_URL}/delete-transactions",
                         params={"user_id": st.session_state.user_id},
+                        timeout=REQUEST_TIMEOUT,
                     )
                 if response.status_code == 200:
                     st.session_state.action_notice = "All transactions deleted."
@@ -688,7 +721,7 @@ with tab4:
         st.markdown(
             """
         <div class="danger-zone">
-            <h4 style="margin-top:0;">⚠️ Delete Account</h4>
+            <h4 style="margin-top:0;">Delete Account</h4>
             <p style="color:#FF6B6B;">Permanently erase your account and all data. This cannot be undone.</p>
         </div>
         """,
@@ -704,14 +737,10 @@ with tab4:
                     response = requests.delete(
                         f"{BASE_URL}/delete-account",
                         params={"user_id": st.session_state.user_id},
+                        timeout=REQUEST_TIMEOUT,
                     )
                 if response.status_code == 200:
-                    st.session_state.logged_in = False
-                    st.session_state.user_id = None
-                    st.session_state.user_name = None
-                    st.session_state.processed_upload_key = None
-                    st.session_state.upload_notice = None
-                    st.session_state.action_notice = None
+                    reset_session()
                     st.success("Account deleted. Goodbye!")
                     st.rerun()
                 else:
@@ -723,7 +752,7 @@ with tab4:
 st.markdown(
     """
 <div class="footer">
-    © 2026 Expense Intelligence Platform · Secure
+    Copyright 2026 Expense Intelligence Platform. Secure.
 </div>
 """,
     unsafe_allow_html=True,
