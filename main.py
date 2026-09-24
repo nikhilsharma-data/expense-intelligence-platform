@@ -1,11 +1,12 @@
 import logging
 import os
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from typing import List, Optional
 
 import bcrypt
+import jwt
 import pandas as pd
 import pdfplumber
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
@@ -22,8 +23,21 @@ ALLOWED_ORIGINS = [
     for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")
     if origin.strip()
 ]
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_MB", "10")) * 1024 * 1024
+
+MAX_UPLOAD_SIZE_BYTES = (
+    int(os.getenv("MAX_UPLOAD_SIZE_MB", "10")) * 1024 * 1024
+)
+
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRATION_MINUTES = int(
+    os.getenv("JWT_EXPIRATION_MINUTES", "60")
+)
+
+if not JWT_SECRET_KEY:
+    raise RuntimeError("JWT_SECRET_KEY environment variable is required")
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -587,7 +601,21 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         plain_password.encode("utf-8"),
         hashed_password.encode("utf-8"),
     )
+def create_access_token(user_id: int) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        minutes=JWT_EXPIRATION_MINUTES
+    )
 
+    payload = {
+        "sub": str(user_id),
+        "exp": expires_at,
+    }
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
 
 # -------------------------------
 # Root
