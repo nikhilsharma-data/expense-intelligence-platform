@@ -1,6 +1,8 @@
+import hashlib
 import logging
 import os
 import re
+import secrets
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from typing import List, Optional
@@ -10,6 +12,7 @@ import jwt
 import pandas as pd
 import pdfplumber
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -38,6 +41,8 @@ JWT_EXPIRATION_MINUTES = int(
 
 if not JWT_SECRET_KEY:
     raise RuntimeError("JWT_SECRET_KEY environment variable is required")
+
+bearer_scheme = HTTPBearer()
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -70,6 +75,14 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+    
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
 
 
 class StatusMessage(BaseModel):
@@ -85,6 +98,7 @@ class LoginResponse(BaseModel):
     status: str
     user_id: int
     name: str
+    access_token: str
 
 
 class TransactionOut(BaseModel):
@@ -158,6 +172,34 @@ def startup_db():
                 );
                 """
             )
+            
+            cur.execute(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0
+                """
+                )
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    token_hash TEXT NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    used_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_token_hash
+                ON password_reset_tokens(token_hash);
+                """
+            )
+
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS transactions (
@@ -170,18 +212,19 @@ def startup_db():
                 );
                 """
             )
+
             cur.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_transactions_user_id
                 ON transactions(user_id);
                 """
             )
+
         conn.commit()
     finally:
         conn.close()
+
     logger.info("Database tables and indexes verified.")
-
-
 # -------------------------------
 # Helpers
 # -------------------------------
@@ -601,10 +644,127 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         plain_password.encode("utf-8"),
         hashed_password.encode("utf-8"),
     )
+    
+def generate_password_reset_token() -> tuple[str, str]:
+    raw_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(
+        raw_token.encode("utf-8")
+    ).hexdigest()
+
+    return raw_token, token_hash
+
 def create_access_token(user_id: int) -> str:
+    conn = get_db_connection()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT token_version
+                FROM users
+                WHERE id = %s
+                """,
+                (user_id,),
+            )
+
+            row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(
+                    status_code=401,
+                    detail="User not found",
+                )
+
+            token_version = row[0]
+
+    finally:
+        conn.close()
+
     expires_at = datetime.now(timezone.utc) + timedelta(
         minutes=JWT_EXPIRATION_MINUTES
     )
+
+    payload = {
+        "sub": str(user_id),
+        "token_version": token_version,
+        "exp": expires_at,
+    }
+
+    return jwt.encode(
+        payload,
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
+    
+def get_current_user_id(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> int:
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(
+            token,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+        )
+
+        user_id = payload.get("sub")
+        token_version = payload.get("token_version")
+
+        if not user_id or token_version is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token",
+            )
+
+        user_id = int(user_id)
+        token_version = int(token_version)
+
+        conn = get_db_connection()
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT token_version
+                    FROM users
+                    WHERE id = %s
+                    """,
+                    (user_id,),
+                )
+
+                row = cur.fetchone()
+
+        finally:
+            conn.close()
+
+        if not row:
+            raise HTTPException(
+                status_code=401,
+                detail="User not found",
+            )
+
+        current_token_version = row[0]
+
+        if token_version != current_token_version:
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication token has been invalidated",
+            )
+
+        return user_id
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication token has expired",
+        )
+
+    except (jwt.InvalidTokenError, ValueError, TypeError):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+        )
 
     payload = {
         "sub": str(user_id),
@@ -687,7 +847,8 @@ def login(user: LoginRequest, db=Depends(get_db)):
             raise HTTPException(status_code=401, detail="Invalid password")
 
         logger.info("User logged in: %s", email)
-        return {"status": "success", "user_id": user_id, "name": name}
+        access_token = create_access_token(user_id)
+        return {"status": "success", "user_id": user_id, "name": name, "access_token": access_token}
 
     except HTTPException:
         raise
@@ -696,6 +857,172 @@ def login(user: LoginRequest, db=Depends(get_db)):
         logger.exception("Login failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+# -------------------------------
+# Password Reset
+# -------------------------------
+@app.post("/forgot-password", response_model=StatusMessage)
+def forgot_password(
+    request: ForgotPasswordRequest,
+    db=Depends(get_db),
+):
+    conn, cur = db
+    email = normalize_email(request.email)
+
+    try:
+        cur.execute(
+            "SELECT id FROM users WHERE email = %s",
+            (email,),
+        )
+        row = cur.fetchone()
+
+        # Always return the same response whether the account exists or not.
+        if not row:
+            return {
+                "message": "If an account exists for this email, a password reset link has been sent."
+            }
+
+        user_id = row[0]
+
+        # Invalidate any previous unused reset tokens.
+        cur.execute(
+            """
+            UPDATE password_reset_tokens
+            SET used_at = NOW()
+            WHERE user_id = %s
+              AND used_at IS NULL
+            """,
+            (user_id,),
+        )
+
+        raw_token, token_hash = generate_password_reset_token()
+
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+
+        cur.execute(
+            """
+            INSERT INTO password_reset_tokens (
+                user_id,
+                token_hash,
+                expires_at
+            )
+            VALUES (%s, %s, %s)
+            """,
+            (user_id, token_hash, expires_at),
+        )
+
+        conn.commit()
+
+        # Development only:
+        # This lets us test the reset flow before email delivery is added.
+        logger.info(
+            "Password reset token generated for user_id=%s: %s",
+            user_id,
+            raw_token,
+        )
+
+        return {
+            "message": "If an account exists for this email, a password reset link has been sent."
+        }
+
+    except Exception:
+        conn.rollback()
+        logger.exception("Forgot-password request failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error",
+        )
+
+# -------------------------------
+# Reset Password
+# -------------------------------
+@app.post("/reset-password", response_model=StatusMessage)
+def reset_password(
+    request: ResetPasswordRequest,
+    db=Depends(get_db),
+):
+    conn, cur = db
+
+    try:
+        validate_required_text(
+            request.token,
+            "Reset token",
+        )
+
+        validate_required_text(
+            request.new_password,
+            "Password",
+            min_length=8,
+        )
+
+        token_hash = hashlib.sha256(
+            request.token.encode("utf-8")
+        ).hexdigest()
+
+        cur.execute(
+            """
+            SELECT id, user_id
+            FROM password_reset_tokens
+            WHERE token_hash = %s
+              AND used_at IS NULL
+              AND expires_at > NOW()
+            """,
+            (token_hash,),
+        )
+
+        row = cur.fetchone()
+
+        if not row:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid or expired password reset token",
+            )
+
+        reset_token_id, user_id = row
+
+        new_password_hash = hash_password(
+            request.new_password
+        )
+
+        cur.execute(
+            """
+            UPDATE users
+            SET password_hash = %s,
+                token_version = token_version + 1
+            WHERE id = %s
+            """,
+            (new_password_hash, user_id),
+        )
+
+        cur.execute(
+            """
+            UPDATE password_reset_tokens
+            SET used_at = NOW()
+            WHERE id = %s
+            """,
+            (reset_token_id,),
+        )
+
+        conn.commit()
+
+        logger.info(
+            "Password reset completed for user_id=%s",
+            user_id,
+        )
+
+        return {
+            "message": "Password has been reset successfully."
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        conn.rollback()
+        logger.exception("Password reset failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal server error",
+        )
 
 # -------------------------------
 # File Upload
@@ -924,7 +1251,16 @@ def get_summary(
 
 
 @app.get("/transactions", response_model=List[TransactionOut])
-def get_transactions(user_id: int = Query(..., gt=0), db=Depends(get_db)):
+def get_transactions(
+    user_id: int = Query(..., gt=0),
+    current_user_id: int = Depends(get_current_user_id),
+    db=Depends(get_db),
+):
+    if user_id != current_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorized to access this user's data",
+        )
     conn, cur = db
 
     try:
