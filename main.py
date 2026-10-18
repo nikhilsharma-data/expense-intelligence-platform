@@ -1,5 +1,6 @@
 import hashlib
 import logging
+from math import isfinite
 import os
 import re
 import secrets
@@ -17,13 +18,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from db import get_db_connection
+from analytics import detect_unusual_spending, monthly_spending_forecast
 
 # -------------------------------
 # Configuration
 # -------------------------------
 ALLOWED_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:8501,http://127.0.0.1:8501",
+    ).split(",")
     if origin.strip()
 ]
 
@@ -32,6 +37,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 MAX_UPLOAD_SIZE_BYTES = (
     int(os.getenv("MAX_UPLOAD_SIZE_MB", "10")) * 1024 * 1024
 )
+MAX_UPLOAD_ROWS = int(os.getenv("MAX_UPLOAD_ROWS", "5000"))
 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
@@ -42,7 +48,7 @@ JWT_EXPIRATION_MINUTES = int(
 if not JWT_SECRET_KEY:
     raise RuntimeError("JWT_SECRET_KEY environment variable is required")
 
-bearer_scheme = HTTPBearer()
+bearer_scheme = HTTPBearer(auto_error=False)
 
 logging.basicConfig(
     level=LOG_LEVEL,
@@ -58,7 +64,7 @@ app = FastAPI(title="Expense Intelligence API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -128,6 +134,7 @@ class SummaryOut(BaseModel):
 class UploadResponse(BaseModel):
     status: str
     rows_loaded: Optional[int] = None
+    rows_skipped: Optional[int] = None
     preview: Optional[str] = None
     transactions: Optional[List[dict]] = None
 
@@ -293,7 +300,8 @@ def parse_money(value):
         return None
 
     try:
-        return float(cleaned)
+        amount = float(cleaned)
+        return amount if isfinite(amount) else None
     except ValueError:
         return None
 
@@ -375,6 +383,34 @@ def parse_pdf_table_transactions(table):
             transactions.append((date_str, description, -withdrawal_amount))
 
     return transactions
+
+
+def extract_pdf_transactions(pdf_bytes):
+    """Extract supported statement rows, converting parser failures to safe client errors."""
+    extracted_text = ""
+    transactions = []
+    seen_transactions = set()
+    try:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    extracted_text += text + "\n"
+                    for date_str, description, amount in parse_pdf_text_transactions(text):
+                        add_pdf_transaction(transactions, seen_transactions, date_str, description, amount)
+                tables = page.extract_tables()
+                for table in tables:
+                    if not table:
+                        continue
+                    for date_str, description, amount in parse_pdf_table_transactions(table):
+                        add_pdf_transaction(transactions, seen_transactions, date_str, description, amount)
+    except Exception:
+        logger.info("Uploaded PDF could not be parsed")
+        raise HTTPException(
+            status_code=422,
+            detail="PDF could not be read. Upload a valid text-based statement or CSV file.",
+        ) from None
+    return extracted_text, transactions
 
 
 def has_keyword(desc: str, keywords: tuple[str, ...]) -> bool:
@@ -697,8 +733,10 @@ def create_access_token(user_id: int) -> str:
     )
     
 def get_current_user_id(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> int:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Bearer authentication is required", headers={"WWW-Authenticate": "Bearer"})
     token = credentials.credentials
 
     try:
@@ -706,12 +744,13 @@ def get_current_user_id(
             token,
             JWT_SECRET_KEY,
             algorithms=[JWT_ALGORITHM],
+            options={"require": ["exp", "sub", "token_version"]},
         )
 
         user_id = payload.get("sub")
         token_version = payload.get("token_version")
 
-        if not user_id or token_version is None:
+        if not isinstance(user_id, str) or not user_id.isdecimal() or token_version is None:
             raise HTTPException(
                 status_code=401,
                 detail="Invalid authentication token",
@@ -766,16 +805,6 @@ def get_current_user_id(
             detail="Invalid authentication token",
         )
 
-    payload = {
-        "sub": str(user_id),
-        "exp": expires_at,
-    }
-
-    return jwt.encode(
-        payload,
-        JWT_SECRET_KEY,
-        algorithm=JWT_ALGORITHM,
-    )
 
 # -------------------------------
 # Root
@@ -797,11 +826,6 @@ def signup(user: SignupRequest, db=Depends(get_db)):
     validate_required_text(user.password, "Password", min_length=6)
 
     try:
-        cur.execute("SELECT id FROM users WHERE email = %s", (email,))
-
-        if cur.fetchone():
-            raise HTTPException(status_code=409, detail="Email already registered")
-
         hashed_pw = hash_password(user.password)
         cur.execute(
             """
@@ -819,8 +843,10 @@ def signup(user: SignupRequest, db=Depends(get_db)):
     except HTTPException:
         raise
 
-    except Exception:
+    except Exception as exc:
         conn.rollback()
+        if getattr(exc, "pgcode", None) == "23505":
+            raise HTTPException(status_code=409, detail="Email already registered")
         logger.exception("Signup failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
@@ -839,12 +865,12 @@ def login(user: LoginRequest, db=Depends(get_db)):
         row = cur.fetchone()
 
         if not row:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
 
         user_id, name, stored_hash = row
 
         if not verify_password(user.password, stored_hash):
-            raise HTTPException(status_code=401, detail="Invalid password")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
 
         logger.info("User logged in: %s", email)
         access_token = create_access_token(user_id)
@@ -912,13 +938,7 @@ def forgot_password(
 
         conn.commit()
 
-        # Development only:
-        # This lets us test the reset flow before email delivery is added.
-        logger.info(
-            "Password reset token generated for user_id=%s: %s",
-            user_id,
-            raw_token,
-        )
+        # Password reset delivery is not implemented; do not log reset secrets.
 
         return {
             "message": "If an account exists for this email, a password reset link has been sent."
@@ -1029,12 +1049,12 @@ def reset_password(
 # -------------------------------
 @app.post("/upload", response_model=UploadResponse)
 async def upload_file(
-    user_id: int = Query(..., gt=0),
+    user_id: int = Depends(get_current_user_id),
     file: UploadFile = File(...),
     db=Depends(get_db),
 ):
     conn, cur = db
-    logger.info("Upload request from user %s: %s", user_id, file.filename)
+    logger.info("Upload request for authenticated user %s", user_id)
 
     try:
         if not file.filename:
@@ -1042,8 +1062,15 @@ async def upload_file(
 
         filename = file.filename.lower()
 
+        upload_bytes = await file.read(MAX_UPLOAD_SIZE_BYTES + 1)
+        if len(upload_bytes) > MAX_UPLOAD_SIZE_BYTES:
+            raise HTTPException(status_code=413, detail="File exceeds the configured upload size limit")
+
         if filename.endswith(".csv"):
-            df = pd.read_csv(file.file)
+            try:
+                df = pd.read_csv(BytesIO(upload_bytes))
+            except Exception:
+                raise HTTPException(status_code=400, detail="CSV could not be read; check its format and encoding")
             df.columns = df.columns.str.strip().str.lower()
 
             required_cols = ["date", "description", "amount"]
@@ -1051,9 +1078,18 @@ async def upload_file(
                 if col not in df.columns:
                     raise HTTPException(status_code=400, detail=f"Missing column: {col}")
 
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            if len(df) > MAX_UPLOAD_ROWS:
+                raise HTTPException(status_code=413, detail=f"CSV exceeds the {MAX_UPLOAD_ROWS}-row limit")
+            source_rows = len(df)
+            df["description"] = df["description"].fillna("").astype(str).str.strip()
+            df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=True)
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+            df = df[df["amount"].map(lambda amount: pd.notna(amount) and isfinite(float(amount)))]
             df = df.dropna(subset=["date", "amount"])
+            df = df[df["description"].str.len() > 0]
+            rows_skipped = source_rows - len(df)
+            if df.empty:
+                raise HTTPException(status_code=422, detail="No valid transactions were found in this CSV")
 
             cur.execute("DELETE FROM transactions WHERE user_id = %s", (user_id,))
 
@@ -1070,53 +1106,10 @@ async def upload_file(
 
             conn.commit()
             logger.info("CSV uploaded for user %s: %s rows", user_id, len(df))
-            return {"status": "success", "rows_loaded": len(df)}
+            return {"status": "success", "rows_loaded": len(df), "rows_skipped": rows_skipped}
 
         if filename.endswith(".pdf"):
-            pdf_bytes = await file.read()
-            if len(pdf_bytes) > MAX_UPLOAD_SIZE_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail="PDF file is too large for processing",
-                )
-
-            extracted_text = ""
-            transactions = []
-            seen_transactions = set()
-
-            with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-                for page in pdf.pages:
-                    text = page.extract_text()
-
-                    if text:
-                        extracted_text += text + "\n"
-                        logger.debug("Page text length: %s", len(text))
-                        for date_str, description, amount in parse_pdf_text_transactions(text):
-                            add_pdf_transaction(
-                                transactions,
-                                seen_transactions,
-                                date_str,
-                                description,
-                                amount,
-                            )
-                    else:
-                        logger.debug("No text found on page")
-
-                    tables = page.extract_tables()
-                    logger.debug("Tables found on page: %s", len(tables))
-
-                    for table in tables:
-                        if not table:
-                            continue
-
-                        for date_str, description, amount in parse_pdf_table_transactions(table):
-                            add_pdf_transaction(
-                                transactions,
-                                seen_transactions,
-                                date_str,
-                                description,
-                                amount,
-                            )
+            extracted_text, transactions = extract_pdf_transactions(upload_bytes)
 
             if not transactions:
                 raise HTTPException(
@@ -1126,6 +1119,22 @@ async def upload_file(
                         "Please upload a text-based statement or CSV file."
                     ),
                 )
+            parsed_count = len(transactions)
+            normalized_transactions = []
+            for txn in transactions:
+                parsed_date = pd.to_datetime(txn["date"], dayfirst=True, errors="coerce")
+                description = str(txn["description"] or "").strip()
+                if pd.isna(parsed_date) or not description:
+                    continue
+                txn["date"] = parsed_date.date()
+                txn["description"] = description
+                normalized_transactions.append(txn)
+            transactions = normalized_transactions
+            rows_skipped = parsed_count - len(transactions)
+            if not transactions:
+                raise HTTPException(status_code=422, detail="No transactions with valid dates and descriptions were found in this PDF")
+            if len(transactions) > MAX_UPLOAD_ROWS:
+                raise HTTPException(status_code=413, detail=f"PDF exceeds the {MAX_UPLOAD_ROWS}-transaction limit")
 
             cur.execute("DELETE FROM transactions WHERE user_id = %s", (user_id,))
 
@@ -1139,7 +1148,7 @@ async def upload_file(
                     """,
                     (
                         user_id,
-                        pd.to_datetime(txn["date"], dayfirst=True),
+                        txn["date"],
                         txn["description"],
                         txn["amount"],
                         category,
@@ -1154,7 +1163,9 @@ async def upload_file(
             )
             return {
                 "status": "success",
-                "preview": extracted_text[:5000],
+                "rows_loaded": len(transactions),
+                "rows_skipped": rows_skipped,
+                "preview": "text extracted" if extracted_text.strip() else "",
                 "transactions": transactions[:20],
             }
 
@@ -1173,7 +1184,7 @@ async def upload_file(
 # Data Management
 # -------------------------------
 @app.delete("/delete-transactions", response_model=StatusMessage)
-def delete_transactions(user_id: int = Query(..., gt=0), db=Depends(get_db)):
+def delete_transactions(user_id: int = Depends(get_current_user_id), db=Depends(get_db)):
     conn, cur = db
 
     try:
@@ -1190,7 +1201,7 @@ def delete_transactions(user_id: int = Query(..., gt=0), db=Depends(get_db)):
 
 
 @app.delete("/delete-account", response_model=StatusMessage)
-def delete_account(user_id: int = Query(..., gt=0), db=Depends(get_db)):
+def delete_account(user_id: int = Depends(get_current_user_id), db=Depends(get_db)):
     conn, cur = db
 
     try:
@@ -1213,7 +1224,7 @@ def delete_account(user_id: int = Query(..., gt=0), db=Depends(get_db)):
 @app.get("/summary", response_model=SummaryOut)
 def get_summary(
     range: str = "all",
-    user_id: int = Query(..., gt=0),
+    user_id: int = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
     conn, cur = db
@@ -1252,15 +1263,9 @@ def get_summary(
 
 @app.get("/transactions", response_model=List[TransactionOut])
 def get_transactions(
-    user_id: int = Query(..., gt=0),
-    current_user_id: int = Depends(get_current_user_id),
+    user_id: int = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
-    if user_id != current_user_id:
-        raise HTTPException(
-            status_code=403,
-            detail="You are not authorized to access this user's data",
-        )
     conn, cur = db
 
     try:
@@ -1293,7 +1298,7 @@ def get_transactions(
 @app.get("/category-breakdown", response_model=List[CategoryOut])
 def category_breakdown(
     range: str = "all",
-    user_id: int = Query(..., gt=0),
+    user_id: int = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
     conn, cur = db
@@ -1323,7 +1328,7 @@ def category_breakdown(
 @app.get("/monthly-trend", response_model=List[TrendOut])
 def monthly_trend(
     range: str = "all",
-    user_id: int = Query(..., gt=0),
+    user_id: int = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
     conn, cur = db
@@ -1354,7 +1359,7 @@ def monthly_trend(
 @app.get("/insights", response_model=InsightResponse)
 def get_insights(
     range: str = "all",
-    user_id: int = Query(..., gt=0),
+    user_id: int = Depends(get_current_user_id),
     db=Depends(get_db),
 ):
     conn, cur = db
@@ -1384,10 +1389,10 @@ def get_insights(
 
             if savings >= 0:
                 insights.append(
-                    f"You saved Rs.{savings:,.0f} this period ({ratio:.1f}% of income)"
+                    f"You saved {savings:,.0f} amount units this period ({ratio:.1f}% of income)"
                 )
             else:
-                insights.append(f"Warning: Overspent by Rs.{abs(savings):,.0f}")
+                insights.append(f"Warning: Overspent by {abs(savings):,.0f} amount units")
 
             spend_ratio = (expense / income) * 100
             if spend_ratio > 80:
@@ -1406,7 +1411,7 @@ def get_insights(
         )
         row = cur.fetchone()
         if row:
-            insights.append(f"Highest expense category is {row[0]} (Rs.{row[1]:,.0f})")
+            insights.append(f"Highest expense category is {row[0]} ({row[1]:,.0f} amount units)")
 
         cur.execute(
             f"""
@@ -1436,7 +1441,7 @@ def get_insights(
         )
         row = cur.fetchone()
         if row:
-            insights.append(f"Largest single expense: {row[0]} (Rs.{row[1]:,.0f})")
+            insights.append(f"Largest single expense: {row[0]} ({row[1]:,.0f} amount units)")
 
         cur.execute(
             f"""
@@ -1473,7 +1478,7 @@ def get_insights(
         avg_month = safe_number(row[0]) if row else 0
 
         if avg_month > 0:
-            insights.append(f"Average monthly spend: Rs.{avg_month:,.0f}")
+            insights.append(f"Average monthly spend: {avg_month:,.0f} amount units")
 
         if not insights:
             insights.append("No insights available for selected period")
@@ -1483,3 +1488,25 @@ def get_insights(
     except Exception:
         logger.exception("Insights generation failed")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/forecast")
+def expense_forecast(user_id: int = Depends(get_current_user_id), db=Depends(get_db)):
+    conn, cur = db
+    try:
+        cur.execute("SELECT date, amount FROM transactions WHERE user_id = %s AND amount < 0 ORDER BY date", (user_id,))
+        return monthly_spending_forecast(cur.fetchall())
+    except Exception:
+        logger.exception("Forecast calculation failed")
+        raise HTTPException(status_code=500, detail="Forecast could not be calculated")
+
+
+@app.get("/anomalies")
+def unusual_spending(user_id: int = Depends(get_current_user_id), db=Depends(get_db)):
+    conn, cur = db
+    try:
+        cur.execute("SELECT date, description, category, amount FROM transactions WHERE user_id = %s AND amount < 0 ORDER BY date", (user_id,))
+        return detect_unusual_spending(cur.fetchall())
+    except Exception:
+        logger.exception("Anomaly analysis failed")
+        raise HTTPException(status_code=500, detail="Unusual spending analysis could not be calculated")

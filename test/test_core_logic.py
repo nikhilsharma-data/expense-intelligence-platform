@@ -8,7 +8,9 @@ from main import (
     build_date_clause,
     parse_dr_cr_text_line,
     parse_pdf_text_transactions,
+    extract_pdf_transactions,
 )
+from fastapi import HTTPException
 
 
 # ---------------------------------------------------
@@ -45,6 +47,24 @@ def test_parse_money_empty_value():
 
 def test_parse_money_invalid_value():
     assert parse_money("ABC") is None
+
+
+@pytest.mark.parametrize("value", ["NaN", "inf", "-inf"])
+def test_parse_money_rejects_non_finite_values(value):
+    assert parse_money(value) is None
+
+
+def test_malformed_pdf_returns_safe_validation_error(monkeypatch):
+    import main
+
+    def fail_to_open(_source):
+        raise ValueError("parser detail")
+
+    monkeypatch.setattr(main.pdfplumber, "open", fail_to_open)
+    with pytest.raises(HTTPException) as error:
+        extract_pdf_transactions(b"not a PDF")
+    assert error.value.status_code == 422
+    assert "parser detail" not in error.value.detail
 
 
 # ---------------------------------------------------
