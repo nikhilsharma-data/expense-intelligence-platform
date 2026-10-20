@@ -191,3 +191,34 @@ def test_parse_pdf_text_transactions():
 
     assert transactions[0][2] == -450.00
     assert transactions[1][2] == 60000.00
+
+
+def test_extract_pdf_retains_repeated_identical_transaction_rows(monkeypatch):
+    import main
+
+    line = "01/01/2026 COFFEE SHOP 5.00(Dr) 100.00(Dr)"
+
+    class FakePage:
+        def extract_text(self):
+            return f"{line}\n{line}"
+
+        def extract_tables(self):
+            return []
+
+    class FakePdf:
+        pages = [FakePage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(main.pdfplumber, "open", lambda _source: FakePdf())
+
+    _text, transactions = extract_pdf_transactions(b"synthetic pdf bytes")
+
+    assert transactions == [
+        {"date": "01/01/2026", "description": "COFFEE SHOP", "amount": -5.0},
+        {"date": "01/01/2026", "description": "COFFEE SHOP", "amount": -5.0},
+    ]

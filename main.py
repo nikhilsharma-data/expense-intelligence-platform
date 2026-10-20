@@ -306,15 +306,11 @@ def parse_money(value):
         return None
 
 
-def add_pdf_transaction(transactions, seen, date_str, description, amount):
+def add_pdf_transaction(transactions, date_str, description, amount):
     if not date_str or not description or amount is None:
         return
 
     key = (str(date_str).strip(), str(description).strip(), round(float(amount), 2))
-    if key in seen:
-        return
-
-    seen.add(key)
     transactions.append(
         {
             "date": key[0],
@@ -389,7 +385,6 @@ def extract_pdf_transactions(pdf_bytes):
     """Extract supported statement rows, converting parser failures to safe client errors."""
     extracted_text = ""
     transactions = []
-    seen_transactions = set()
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
@@ -397,13 +392,13 @@ def extract_pdf_transactions(pdf_bytes):
                 if text:
                     extracted_text += text + "\n"
                     for date_str, description, amount in parse_pdf_text_transactions(text):
-                        add_pdf_transaction(transactions, seen_transactions, date_str, description, amount)
+                        add_pdf_transaction(transactions, date_str, description, amount)
                 tables = page.extract_tables()
                 for table in tables:
                     if not table:
                         continue
                     for date_str, description, amount in parse_pdf_table_transactions(table):
-                        add_pdf_transaction(transactions, seen_transactions, date_str, description, amount)
+                        add_pdf_transaction(transactions, date_str, description, amount)
     except Exception:
         logger.info("Uploaded PDF could not be parsed")
         raise HTTPException(
