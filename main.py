@@ -1067,6 +1067,11 @@ async def upload_file(
             except Exception:
                 raise HTTPException(status_code=400, detail="CSV could not be read; check its format and encoding")
             df.columns = df.columns.str.strip().str.lower()
+            if df.columns.duplicated().any():
+                raise HTTPException(
+                    status_code=400,
+                    detail="CSV contains duplicate column names after trimming spaces and ignoring case.",
+                )
 
             required_cols = ["date", "description", "amount"]
             for col in required_cols:

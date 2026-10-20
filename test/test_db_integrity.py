@@ -39,6 +39,45 @@ def test_invalid_csv_upload_does_not_delete_existing_transactions():
     conn.commit.assert_not_called()
 
 
+def test_csv_with_duplicate_normalized_headers_is_rejected_without_mutation():
+    conn = MagicMock()
+    cur = MagicMock()
+    csv_content = (
+        b"date,Date,description,amount\n"
+        b"2026-01-01,2026-01-02,Coffee,-5.00\n"
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(main.upload_file(17, _upload("duplicate-headers.csv", csv_content), (conn, cur)))
+
+    assert error.value.status_code == 400
+    assert "duplicate column names" in error.value.detail.lower()
+    assert not any(
+        "DELETE FROM TRANSACTIONS" in " ".join(str(arg) for arg in call.args).upper()
+        or "INSERT INTO TRANSACTIONS" in " ".join(str(arg) for arg in call.args).upper()
+        for call in cur.execute.call_args_list
+    )
+    conn.commit.assert_not_called()
+
+
+def test_valid_csv_upload_still_replaces_transactions_and_commits():
+    conn = MagicMock()
+    cur = MagicMock()
+    csv_content = b"Date,Description,Amount\n2026-01-01,Coffee,-5.00\n"
+
+    result = asyncio.run(
+        main.upload_file(17, _upload("valid.csv", csv_content), (conn, cur))
+    )
+
+    assert result == {"status": "success", "rows_loaded": 1, "rows_skipped": 0}
+    assert cur.execute.call_count == 2
+    assert cur.execute.call_args_list[0].args[0] == "DELETE FROM transactions WHERE user_id = %s"
+    assert cur.execute.call_args_list[0].args[1] == (17,)
+    assert cur.execute.call_args_list[1].args[1][0] == 17
+    conn.commit.assert_called_once()
+    conn.rollback.assert_not_called()
+
+
 def test_pdf_without_valid_transactions_does_not_delete_existing_transactions(monkeypatch):
     conn = MagicMock()
     cur = MagicMock()
