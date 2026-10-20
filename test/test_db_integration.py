@@ -20,13 +20,20 @@ from fastapi import HTTPException, UploadFile
 
 
 # Importing main normally imports db.py, whose module body loads .env. Prevent
-# that side effect for this suite; the integration connection uses TEST_DATABASE_URL only.
+# that side effect when this module imports main. Even if another test imported
+# main earlier, this suite's connector accepts no DSN argument and reads only
+# the explicitly validated TEST_DATABASE_URL; it never calls the app connector.
 _load_dotenv = dotenv.load_dotenv
 dotenv.load_dotenv = lambda *args, **kwargs: False
+_jwt_secret_was_set = "JWT_SECRET_KEY" in os.environ
+if not _jwt_secret_was_set:
+    os.environ["JWT_SECRET_KEY"] = "integration-test-only-not-for-production"
 try:
     import main
 finally:
     dotenv.load_dotenv = _load_dotenv
+    if not _jwt_secret_was_set:
+        os.environ.pop("JWT_SECRET_KEY", None)
 
 
 pytestmark = [
@@ -59,6 +66,9 @@ def _validated_test_url():
     except (TypeError, ValueError):
         raise RuntimeError("TEST_DATABASE_URL is not a valid PostgreSQL URL") from None
 
+    if parsed.query or parsed.fragment:
+        raise RuntimeError("TEST_DATABASE_URL must not contain query parameters or a fragment")
+
     if (
         parsed.scheme not in {"postgres", "postgresql"}
         or parsed.hostname != EXPECTED_HOST
@@ -71,8 +81,9 @@ def _validated_test_url():
     return dsn
 
 
-def _connect(dsn, schema=None):
-    """Open only the validated test URL; never use application DB configuration."""
+def _connect(schema=None):
+    """Connect only through TEST_DATABASE_URL after rechecking both safety guards."""
+    dsn = _validated_test_url()
     try:
         conn = psycopg2.connect(dsn)
     except Exception:
@@ -101,9 +112,8 @@ def _connect(dsn, schema=None):
 
 @pytest.fixture(scope="session")
 def test_schema():
-    dsn = _validated_test_url()
     schema = f"expense_it_{uuid.uuid4().hex}"
-    conn = _connect(dsn)
+    conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -146,21 +156,44 @@ def test_schema():
     conn.close()
 
     try:
-        yield dsn, schema
+        yield schema
     finally:
-        cleanup = _connect(dsn)
+        cleanup = _connect()
         try:
             with cleanup.cursor() as cur:
-                cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+                if not re.fullmatch(r"expense_it_[0-9a-f]{32}", schema):
+                    raise RuntimeError("Refusing cleanup for an unexpected test schema name")
+
+                # RESTRICT is PostgreSQL's default: any unexpected contents or
+                # dependencies outside this schema abort the transaction.
+                cur.execute(f'DROP TABLE IF EXISTS "{schema}".transactions')
+                cur.execute(f'DROP TABLE IF EXISTS "{schema}".users')
+                cur.execute(
+                    "SELECT proname FROM pg_proc "
+                    "JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace "
+                    "WHERE nspname = %s "
+                    "AND proname ~ '^fail_(insert|user_delete)_[0-9a-f]{32}$'",
+                    (schema,),
+                )
+                for (function_name,) in cur.fetchall():
+                    cur.execute(
+                        f'DROP FUNCTION "{schema}"."{function_name}"()'
+                    )
+                cur.execute(f'DROP SCHEMA "{schema}"')
             cleanup.commit()
+        except Exception:
+            cleanup.rollback()
+            raise RuntimeError(
+                "Safe test-schema cleanup aborted; no cascading cleanup was performed"
+            ) from None
         finally:
             cleanup.close()
 
 
 @pytest.fixture
 def seeded_users(test_schema):
-    dsn, schema = test_schema
-    conn = _connect(dsn, schema)
+    schema = test_schema
+    conn = _connect(schema)
     suffix = uuid.uuid4().hex
     try:
         with conn.cursor() as cur:
@@ -202,8 +235,8 @@ def _upload(content):
     return UploadFile(filename="replacement.csv", file=BytesIO(content))
 
 
-def _install_insert_failure(dsn, schema):
-    conn = _connect(dsn, schema)
+def _install_insert_failure(schema):
+    conn = _connect(schema)
     function = f"fail_insert_{uuid.uuid4().hex}"
     trigger = f"fail_insert_{uuid.uuid4().hex}"
     with conn.cursor() as cur:
@@ -228,11 +261,11 @@ def _install_insert_failure(dsn, schema):
     return function, trigger
 
 
-def _remove_trigger_objects(dsn, schema, function, trigger):
-    conn = _connect(dsn, schema)
+def _remove_trigger_objects(schema, function, trigger, table):
+    conn = _connect(schema)
     try:
         with conn.cursor() as cur:
-            cur.execute(f"DROP TRIGGER IF EXISTS {trigger} ON transactions")
+            cur.execute(f"DROP TRIGGER IF EXISTS {trigger} ON {table}")
             cur.execute(f"DROP FUNCTION IF EXISTS {function}()")
         conn.commit()
     finally:
@@ -240,10 +273,10 @@ def _remove_trigger_objects(dsn, schema, function, trigger):
 
 
 def test_upload_failure_restores_committed_rows(test_schema, seeded_users):
-    dsn, schema = test_schema
+    schema = test_schema
     user_id, _other_id, suffix = seeded_users
-    function, trigger = _install_insert_failure(dsn, schema)
-    upload_conn = _connect(dsn, schema)
+    function, trigger = _install_insert_failure(schema)
+    upload_conn = _connect(schema)
     upload_cur = upload_conn.cursor()
     csv_data = (
         "date,description,amount\n"
@@ -254,7 +287,7 @@ def test_upload_failure_restores_committed_rows(test_schema, seeded_users):
         with pytest.raises(HTTPException) as error:
             asyncio.run(main.upload_file(user_id, _upload(csv_data), (upload_conn, upload_cur)))
         assert error.value.status_code == 500
-        observer = _connect(dsn, schema)
+        observer = _connect(schema)
         try:
             with observer.cursor() as cur:
                 cur.execute(
@@ -269,13 +302,13 @@ def test_upload_failure_restores_committed_rows(test_schema, seeded_users):
     finally:
         upload_cur.close()
         upload_conn.close()
-        _remove_trigger_objects(dsn, schema, function, trigger)
+        _remove_trigger_objects(schema, function, trigger, "transactions")
 
 
 def test_transaction_reads_and_deletes_are_user_scoped(test_schema, seeded_users):
-    dsn, schema = test_schema
+    schema = test_schema
     user_id, other_id, suffix = seeded_users
-    handler_conn = _connect(dsn, schema)
+    handler_conn = _connect(schema)
     handler_cur = handler_conn.cursor()
     try:
         rows = main.get_transactions(user_id=user_id, db=(handler_conn, handler_cur))
@@ -283,7 +316,7 @@ def test_transaction_reads_and_deletes_are_user_scoped(test_schema, seeded_users
         assert all(f"other-{suffix}" not in row["description"] for row in rows)
 
         main.delete_transactions(user_id=user_id, db=(handler_conn, handler_cur))
-        observer = _connect(dsn, schema)
+        observer = _connect(schema)
         try:
             with observer.cursor() as cur:
                 cur.execute("SELECT user_id, description FROM transactions ORDER BY description")
@@ -296,8 +329,8 @@ def test_transaction_reads_and_deletes_are_user_scoped(test_schema, seeded_users
         handler_conn.close()
 
 
-def _install_user_delete_failure(dsn, schema):
-    conn = _connect(dsn, schema)
+def _install_user_delete_failure(schema):
+    conn = _connect(schema)
     function = f"fail_user_delete_{uuid.uuid4().hex}"
     trigger = f"fail_user_delete_{uuid.uuid4().hex}"
     with conn.cursor() as cur:
@@ -320,15 +353,16 @@ def _install_user_delete_failure(dsn, schema):
 
 
 def test_account_deletion_failure_preserves_user_and_transactions(test_schema, seeded_users):
-    dsn, schema = test_schema
+    schema = test_schema
     user_id, _other_id, suffix = seeded_users
-    function, trigger = _install_user_delete_failure(dsn, schema)
-    handler_conn = _connect(dsn, schema)
+    function, trigger = _install_user_delete_failure(schema)
+    handler_conn = None
     try:
+        handler_conn = _connect(schema)
         with pytest.raises(HTTPException) as error:
             main.delete_account(user_id=user_id, db=(handler_conn, handler_conn.cursor()))
         assert error.value.status_code == 500
-        observer = _connect(dsn, schema)
+        observer = _connect(schema)
         try:
             with observer.cursor() as cur:
                 cur.execute("SELECT count(*) FROM users WHERE id = %s", (user_id,))
@@ -341,14 +375,18 @@ def test_account_deletion_failure_preserves_user_and_transactions(test_schema, s
         finally:
             observer.close()
     finally:
-        handler_conn.close()
-        _remove_trigger_objects(dsn, schema, function, trigger)
+        try:
+            if handler_conn is not None:
+                handler_conn.close()
+        finally:
+            _remove_trigger_objects(schema, function, trigger, "users")
 
 
-def test_test_schema_has_cascade_foreign_key_and_enforces_it(test_schema, seeded_users):
-    dsn, schema = test_schema
+def test_fixture_schema_has_cascade_foreign_key_and_enforces_it(test_schema, seeded_users):
+    """Verify only this fixture-created schema, not app startup or Neon."""
+    schema = test_schema
     user_id, _other_id, suffix = seeded_users
-    conn = _connect(dsn, schema)
+    conn = _connect(schema)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -383,7 +421,7 @@ def test_test_schema_has_cascade_foreign_key_and_enforces_it(test_schema, seeded
             assert cur.fetchone()[0] == 0
         conn.commit()
 
-        observer = _connect(dsn, schema)
+        observer = _connect(schema)
         try:
             with observer.cursor() as cur:
                 cur.execute("SELECT count(*) FROM transactions WHERE user_id = %s", (user_id,))
