@@ -5,8 +5,10 @@
 __pycache__/
 *.pyc
 
-# Environment variables (VERY IMPORTANT)
+# Environment variables and backups (never commit secrets)
 .env
+.env.*
+!.env.example
 
 # VS Code
 .vscode/

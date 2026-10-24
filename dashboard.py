@@ -15,9 +15,14 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+try:
+    _secret_api_url = st.secrets.get("EXPENSE_API_BASE_URL", None)
+except Exception:
+    _secret_api_url = None
+
 BASE_URL = (
     os.getenv("EXPENSE_API_BASE_URL")
-    or st.secrets.get("EXPENSE_API_BASE_URL", None)
+    or _secret_api_url
     or "https://expense-intelligence-platform.onrender.com"
 ).rstrip("/")
 REQUEST_TIMEOUT = 30
@@ -187,11 +192,17 @@ def response_detail(response, fallback):
         return fallback
 
 
+def auth_headers():
+    token = st.session_state.get("access_token")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
 def safe_get(endpoint, default, params=None):
     try:
         response = requests.get(
             f"{BASE_URL}/{endpoint}",
             params=params,
+            headers=auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         if response.status_code == 200:
@@ -216,6 +227,7 @@ def reset_session():
     st.session_state.logged_in = False
     st.session_state.user_id = None
     st.session_state.user_name = None
+    st.session_state.access_token = None
     st.session_state.processed_upload_key = None
     st.session_state.upload_notice = None
     st.session_state.action_notice = None
@@ -230,6 +242,8 @@ if "user_id" not in st.session_state:
     st.session_state.user_id = None
 if "user_name" not in st.session_state:
     st.session_state.user_name = None
+if "access_token" not in st.session_state:
+    st.session_state.access_token = None
 if "processed_upload_key" not in st.session_state:
     st.session_state.processed_upload_key = None
 if "upload_notice" not in st.session_state:
@@ -296,6 +310,7 @@ if not st.session_state.logged_in:
                     st.session_state.logged_in = True
                     st.session_state.user_id = data["user_id"]
                     st.session_state.user_name = data["name"]
+                    st.session_state.access_token = data["access_token"]
                     st.success("Login successful!")
                     st.rerun()
                 else:
@@ -388,28 +403,30 @@ with st.spinner("Crunching your numbers..."):
     summary = safe_get(
         "summary",
         {},
-        params={"range": date_range, "user_id": st.session_state.user_id},
+        params={"range": date_range},
     )
     categories = safe_get(
         "category-breakdown",
         [],
-        params={"range": date_range, "user_id": st.session_state.user_id},
+        params={"range": date_range},
     )
     trend = safe_get(
         "monthly-trend",
         [],
-        params={"range": date_range, "user_id": st.session_state.user_id},
+        params={"range": date_range},
     )
     insights = safe_get(
         "insights",
         {},
-        params={"range": date_range, "user_id": st.session_state.user_id},
+        params={"range": date_range},
     )
     transactions = safe_get(
         "transactions",
         [],
-        params={"user_id": st.session_state.user_id},
     )
+    forecast = safe_get("forecast", {})
+    anomalies = safe_get("anomalies", {})
+    research_evaluation = safe_get("research-evaluation", {})
 
 has_data = bool(
     summary
@@ -426,8 +443,8 @@ if st.session_state.action_notice:
 # ---------------------------------------------------
 # TABS
 # ---------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Dashboard", "Insights", "Upload", "Settings"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Dashboard", "Insights", "Upload", "Settings", "Research"]
 )
 
 # ==================== DASHBOARD TAB ====================
@@ -449,7 +466,7 @@ with tab1:
             <div class="metric-card">
                 <div class="metric-icon">Balance</div>
                 <div class="metric-label">Total Balance</div>
-                <div class="metric-value">Rs. {balance:,.0f}</div>
+                <div class="metric-value">{balance:,.0f} amount units</div>
             </div>
             """,
                 unsafe_allow_html=True,
@@ -460,7 +477,7 @@ with tab1:
             <div class="metric-card">
                 <div class="metric-icon">Outflow</div>
                 <div class="metric-label">Expenses</div>
-                <div class="metric-value">Rs. {expense:,.0f}</div>
+                <div class="metric-value">{expense:,.0f} amount units</div>
                 <div class="metric-delta">{expense_ratio:.1f}% of income</div>
             </div>
             """,
@@ -472,7 +489,7 @@ with tab1:
             <div class="metric-card">
                 <div class="metric-icon">Inflow</div>
                 <div class="metric-label">Income</div>
-                <div class="metric-value">Rs. {income:,.0f}</div>
+                <div class="metric-value">{income:,.0f} amount units</div>
             </div>
             """,
                 unsafe_allow_html=True,
@@ -507,7 +524,7 @@ with tab1:
                     y="category",
                     orientation="h",
                     title="Spending by Category",
-                    labels={"total": "Amount (Rs.)", "category": ""},
+                    labels={"total": "Amount (imported units)", "category": ""},
                     color="total",
                     color_continuous_scale="blues",
                 )
@@ -555,7 +572,7 @@ with tab1:
                 x="month",
                 y="total",
                 title="Monthly balance movement",
-                labels={"month": "Month", "total": "Net Cashflow (Rs.)"},
+                labels={"month": "Month", "total": "Net cashflow (imported units)"},
             )
             fig_trend.update_layout(template="plotly_dark", font_family="Inter")
             st.plotly_chart(fig_trend, use_container_width=True)
@@ -584,7 +601,7 @@ with tab2:
         txn_df["amount"] = pd.to_numeric(txn_df["amount"], errors="coerce").fillna(0)
         txn_df["type"] = txn_df["amount"].apply(lambda x: "Credit" if x > 0 else "Debit")
         txn_df["display_amount"] = txn_df["amount"].apply(
-            lambda x: f"+Rs. {x:,.0f}" if x > 0 else f"-Rs. {abs(x):,.0f}"
+            lambda x: f"+{x:,.0f} units" if x > 0 else f"-{abs(x):,.0f} units"
         )
 
         search = st.text_input("Search by description")
@@ -642,7 +659,7 @@ with tab3:
                 with st.spinner("Processing statement..."):
                     response = requests.post(
                         f"{BASE_URL}/upload",
-                        params={"user_id": st.session_state.user_id},
+                        headers=auth_headers(),
                         files=files,
                         timeout=REQUEST_TIMEOUT,
                     )
@@ -707,7 +724,7 @@ with tab4:
                 with st.spinner("Deleting transactions..."):
                     response = requests.delete(
                         f"{BASE_URL}/delete-transactions",
-                        params={"user_id": st.session_state.user_id},
+                        headers=auth_headers(),
                         timeout=REQUEST_TIMEOUT,
                     )
                 if response.status_code == 200:
@@ -736,7 +753,7 @@ with tab4:
                 with st.spinner("Deleting account..."):
                     response = requests.delete(
                         f"{BASE_URL}/delete-account",
-                        params={"user_id": st.session_state.user_id},
+                        headers=auth_headers(),
                         timeout=REQUEST_TIMEOUT,
                     )
                 if response.status_code == 200:
@@ -745,6 +762,244 @@ with tab4:
                     st.rerun()
                 else:
                     st.error(response_detail(response, "Deletion failed"))
+
+# ==================== RESEARCH TAB ====================
+with tab5:
+    st.markdown("### Research Evaluation")
+    st.caption(
+        "Categorization and anomaly scores below use fixed synthetic examples only. "
+        "They are not estimates of performance on your transactions or real bank statements."
+    )
+
+    evaluation = research_evaluation.get("categorization")
+    anomaly_evaluation = research_evaluation.get("anomaly_detection")
+    categorization_metrics_valid = bool(
+        evaluation
+        and evaluation.get("evaluation_size", 0) > 0
+        and all(
+            evaluation.get("methods", {}).get(method, {}).get("accuracy") is not None
+            for method in ("keyword_rules_baseline", "multinomial_naive_bayes")
+        )
+    )
+    anomaly_metrics_valid = bool(
+        anomaly_evaluation
+        and anomaly_evaluation.get("evaluation_size", 0) > 0
+        and anomaly_evaluation.get("f1") is not None
+    )
+    if categorization_metrics_valid:
+        st.markdown("#### Rule-vocabulary coverage check")
+        st.caption(
+            f"{evaluation['dataset_size']} synthetic labeled descriptions: "
+            f"{evaluation['training_size']} training and "
+            f"{evaluation['evaluation_size']} held-out examples. "
+            f"{evaluation['evaluation_label']} {evaluation['methodology']}"
+        )
+        method_names = {
+            "keyword_rules_baseline": "Keyword rules",
+            "multinomial_naive_bayes": "Multinomial Naive Bayes",
+        }
+        metric_rows = []
+        for method, metrics in evaluation["methods"].items():
+            metric_rows.append({
+                "Method": method_names.get(method, method),
+                "Accuracy": metrics.get("accuracy"),
+                "Macro precision": metrics.get("precision_macro"),
+                "Macro recall": metrics.get("recall_macro"),
+                "Macro F1": metrics.get("f1_macro"),
+                "Held-out examples": metrics.get("sample_count"),
+            })
+        st.dataframe(pd.DataFrame(metric_rows), use_container_width=True, hide_index=True)
+        rule_f1 = evaluation["methods"]["keyword_rules_baseline"]["f1_macro"]
+        nb_f1 = evaluation["methods"]["multinomial_naive_bayes"]["f1_macro"]
+        if rule_f1 != nb_f1:
+            higher_f1_method = "Keyword rules" if rule_f1 > nb_f1 else "Multinomial Naive Bayes"
+            st.caption(f"On this synthetic holdout only, {higher_f1_method} has the higher macro F1.")
+        else:
+            st.caption("The methods have equal macro F1 on this synthetic holdout.")
+        with st.expander("Categorization details and limitations"):
+            st.write(evaluation["limitations"])
+            st.write("Category distribution", evaluation["category_distribution"])
+            selected_method = st.selectbox(
+                "Confusion matrix",
+                list(evaluation["methods"]),
+                format_func=lambda method: method_names.get(method, method),
+                key="research_confusion_method",
+            )
+            matrix = evaluation["methods"][selected_method]["confusion_matrix"]
+            st.dataframe(pd.DataFrame(matrix).T, use_container_width=True)
+
+        independent = evaluation.get("independent_synthetic_holdout", {})
+        if independent.get("evaluation_size", 0) > 0:
+            st.markdown("#### Independently authored synthetic challenge set")
+            st.caption(
+                f"{independent['evaluation_size']} manually labeled examples. "
+                f"{independent['methodology']}"
+            )
+            independent_rows = []
+            for method, metrics in independent["methods"].items():
+                independent_rows.append({
+                    "Method": method_names.get(method, method),
+                    "Accuracy": metrics["accuracy"],
+                    "Macro precision": metrics["precision_macro"],
+                    "Macro recall": metrics["recall_macro"],
+                    "Macro F1": metrics["f1_macro"],
+                    "Held-out examples": metrics["sample_count"],
+                })
+            st.dataframe(pd.DataFrame(independent_rows), use_container_width=True, hide_index=True)
+            with st.expander("Challenge set confusion matrix and limitations"):
+                st.write(independent["limitations"])
+                challenge_method = st.selectbox(
+                    "Challenge set confusion matrix",
+                    list(independent["methods"]),
+                    format_func=lambda method: method_names.get(method, method),
+                    key="research_independent_confusion_method",
+                )
+                challenge_matrix = independent["methods"][challenge_method]["confusion_matrix"]
+                st.dataframe(pd.DataFrame(challenge_matrix).T, use_container_width=True)
+
+    else:
+        st.info("Categorization evaluation metrics are unavailable for this response.")
+
+    if anomaly_metrics_valid:
+        st.markdown("#### Unusual-spending detection")
+        st.caption(anomaly_evaluation["methodology"])
+        anomaly_cols = st.columns(4)
+        for column, label, key in zip(
+            anomaly_cols,
+            ("Accuracy", "Precision", "Recall", "F1"),
+            ("accuracy", "precision", "recall", "f1"),
+        ):
+            column.metric(label, f"{anomaly_evaluation[key]:.1%}")
+        st.caption(
+            f"{anomaly_evaluation['evaluation_size']} of "
+            f"{anomaly_evaluation['labelled_target_count']} labeled targets were assessable; "
+            f"{anomaly_evaluation['unscored_insufficient_history']} were withheld for sparse history. "
+            f"Confusion counts: {anomaly_evaluation['confusion_matrix']}. "
+            f"{anomaly_evaluation['limitations']}"
+        )
+        with st.expander("Anomaly evaluation cases and explanations"):
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Date": case["date"],
+                        "Description": case["description"],
+                        "Category": case["category"],
+                        "Amount (imported units)": case["amount"],
+                        "Expected": case["expected_anomaly"],
+                        "Predicted": case["predicted_anomaly"],
+                        "Assessment": case["assessment"],
+                        "Prior same-category rows": case["historical_sample_size"],
+                        "Reason": case["explanation"] or case["label_rationale"],
+                    }
+                    for case in anomaly_evaluation["cases"]
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
+    else:
+        st.info("Anomaly evaluation metrics are unavailable for this response.")
+
+    st.markdown("---")
+    st.markdown("#### Your forecast and unusual-spending review")
+    if forecast:
+        st.caption(
+            f"Forecast horizon: {forecast.get('horizon_months', '—')} month(s). "
+            f"Historical months used: {forecast.get('history_months', 0)}; "
+            f"transactions: {forecast.get('history_transactions', 0)}. "
+            f"{forecast.get('currency', 'Amounts are shown in imported units; currency is unknown.')}"
+        )
+        history_rows = forecast.get("historical_actuals", [])
+        if history_rows:
+            actual_df = pd.DataFrame(history_rows)
+            actual_df["series"] = "Historical actual"
+            fig_forecast = px.line(
+                actual_df,
+                x="month",
+                y="total",
+                markers=True,
+                color="series",
+                title="Historical monthly expenses and next-month forecast",
+                labels={"month": "Month", "total": "Expense amount (imported units)"},
+                color_discrete_sequence=["#4EA1FF"],
+            )
+            if forecast.get("available"):
+                fig_forecast.add_scatter(
+                    x=[forecast["forecast_month"]],
+                    y=[forecast["forecast_amount"]],
+                    mode="markers",
+                    name="Future forecast",
+                    marker={"size": 12, "symbol": "diamond", "color": "#A78BFA"},
+                )
+            else:
+                fig_forecast.update_layout(title="Historical monthly expenses")
+            fig_forecast.update_layout(template="plotly_dark", font_family="Inter")
+            st.plotly_chart(fig_forecast, use_container_width=True)
+        if forecast.get("available"):
+            st.write(forecast.get("method", ""))
+            st.metric(
+                f"Forecast for {forecast['forecast_month']} (imported units)",
+                f"{safe_number(forecast['forecast_amount']):,.2f}",
+                help="Historical actuals and the future estimate are shown as separate series.",
+            )
+            st.caption(forecast.get("limitations", ""))
+        else:
+            st.info(forecast.get("reason") or "A forecast is not available for this account yet.")
+
+        forecast_metrics = forecast.get("evaluation", {})
+        st.markdown("##### Chronological forecast evaluation")
+        if forecast_metrics.get("available"):
+            st.caption(
+                f"{forecast_metrics['periods']} held-out months. "
+                f"{forecast_metrics['method']} Metrics are in imported amount units."
+            )
+            st.dataframe(
+                pd.DataFrame([
+                    {"Method": "Recent-month mean", "MAE": forecast_metrics["mae"], "RMSE": forecast_metrics["rmse"]},
+                    {"Method": "Last-month baseline", "MAE": forecast_metrics["baseline_mae"], "RMSE": forecast_metrics["baseline_rmse"]},
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            model_errors = (forecast_metrics["mae"], forecast_metrics["rmse"])
+            baseline_errors = (forecast_metrics["baseline_mae"], forecast_metrics["baseline_rmse"])
+            if all(value is not None for value in model_errors + baseline_errors):
+                if model_errors == baseline_errors:
+                    st.caption("The methods have equal MAE and RMSE on these held-out months.")
+                elif all(model <= baseline for model, baseline in zip(model_errors, baseline_errors)):
+                    st.caption("The recent-month mean has lower or equal errors on these held-out months.")
+                elif all(baseline <= model for model, baseline in zip(model_errors, baseline_errors)):
+                    st.caption("The last-month baseline has lower or equal errors on these held-out months.")
+                else:
+                    st.caption("The methods trade off MAE and RMSE on these held-out months.")
+        else:
+            st.info(forecast_metrics.get("reason") or "Forecast metrics cannot be calculated yet.")
+    else:
+        st.info("Forecast details are unavailable because the backend did not return a result.")
+
+    if anomalies:
+        flags = anomalies.get("flags", [])
+        st.markdown("##### Possible unusual spending")
+        st.caption(anomalies.get("label", "Flags are indicators for review, not confirmed fraud."))
+        if flags:
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Date": flag.get("date"),
+                        "Description": flag.get("description"),
+                        "Category": flag.get("category"),
+                        "Amount (imported units)": flag.get("amount"),
+                        "Reason": flag.get("reason"),
+                    }
+                    for flag in flags
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info(
+                "No transactions were flagged by the configured rule. A category needs at least "
+                f"{anomalies.get('minimum_history', 3)} earlier transactions to be assessed."
+            )
 
 # ---------------------------------------------------
 # FOOTER

@@ -130,6 +130,7 @@ GET    /monthly-trend
 GET    /insights
 GET    /forecast
 GET    /anomalies
+GET    /research-evaluation
 ```
 
 ## Upload Format
@@ -164,5 +165,7 @@ Login issues a signed, expiring HS256 bearer token. Protected requests derive th
 The dashboard includes an explainable one-month expense forecast. It aggregates negative transaction amounts by calendar month, fills missing months with zero, and forecasts with the mean of up to the latest three months. The last-observed-month baseline is shown alongside chronological rolling-origin MAE/RMSE for both methods; every backtest prediction uses only months before its target. A forecast needs at least three calendar months; evaluation metrics require at least two held-out months and are withheld otherwise. The database does not store currency, so outputs are labeled in imported amount units. This small-sample estimate has no confidence interval or accuracy guarantee.
 
 Possible unusual transactions are flagged against the same user's earlier category transactions using a robust median/MAD rule. A category needs at least three earlier transactions; explanations report the sample size, median, MAD, and the threshold used. Flags are indicators for review, not fraud findings. Pure analytics tests use synthetic examples in `test/test_analytics.py` and require no hosted credentials.
+
+The authenticated Research tab preserves the original 57-description comparison as a rule-vocabulary coverage check and adds a separately authored synthetic challenge set of 38 labeled descriptions (two per supported category) whose wording avoids the current rule terms. Both are compared with a standard-library multinomial Naive Bayes comparator trained on the fixed 19-example training set. The anomaly evaluation uses 26 synthetic transactions and 10 manually labeled targets; 8 targets have sufficient history for precision/recall/F1, while 2 sparse-history cases are reported as unassessable. The anomaly cases include zero/nonzero MAD, borderline and moderate amounts, and a labeled false alarm. These synthetic results do not estimate performance on real statements. The `/research-evaluation` endpoint returns synthetic results only and does not score account transactions. Focused tests are in `test/test_research_evaluation.py`.
 
 To reproduce the rolling-origin comparison on a local export with `date` and signed `amount` columns, run `python scripts/evaluate_forecast.py path/to/transactions.csv`. Invalid rows are skipped; the script emits the next-month estimate and held-out model/baseline MAE and RMSE as JSON.

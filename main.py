@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from db import get_db_connection
 from analytics import detect_unusual_spending, monthly_spending_forecast
+from research_evaluation import evaluate_anomaly_detection, evaluate_categorization
 
 # -------------------------------
 # Configuration
@@ -1082,7 +1083,7 @@ async def upload_file(
                 raise HTTPException(status_code=413, detail=f"CSV exceeds the {MAX_UPLOAD_ROWS}-row limit")
             source_rows = len(df)
             df["description"] = df["description"].fillna("").astype(str).str.strip()
-            df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=True)
+            df["date"] = pd.to_datetime(df["date"], errors="coerce", format="%Y-%m-%d")
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
             df = df[df["amount"].map(lambda amount: pd.notna(amount) and isfinite(float(amount)))]
             df = df.dropna(subset=["date", "amount"])
@@ -1510,3 +1511,13 @@ def unusual_spending(user_id: int = Depends(get_current_user_id), db=Depends(get
     except Exception:
         logger.exception("Anomaly analysis failed")
         raise HTTPException(status_code=500, detail="Unusual spending analysis could not be calculated")
+
+
+@app.get("/research-evaluation")
+def research_evaluation(user_id: int = Depends(get_current_user_id)):
+    """Return reproducible synthetic-data evaluation results for the demo."""
+    return {
+        "categorization": evaluate_categorization(categorize),
+        "anomaly_detection": evaluate_anomaly_detection(),
+        "data_scope": "Synthetic evaluation examples only; no user transactions are scored.",
+    }
