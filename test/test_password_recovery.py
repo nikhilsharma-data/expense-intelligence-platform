@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import bcrypt
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 import requests
 from streamlit.testing.v1 import AppTest
 
@@ -21,6 +21,7 @@ DASHBOARD = Path(__file__).resolve().parents[1] / "dashboard.py"
 def _db(*fetch_rows):
     conn = MagicMock()
     cur = MagicMock()
+    conn.cursor.return_value = cur
     cur.fetchone.side_effect = list(fetch_rows)
     return conn, cur
 
@@ -33,15 +34,17 @@ def test_forgot_password_returns_same_generic_message_for_existing_and_missing_u
     monkeypatch, rows, expected_send
 ):
     conn, cur = _db(*rows)
+    tasks = BackgroundTasks()
     send_email = MagicMock()
     monkeypatch.setattr(main, "send_password_reset_email", send_email)
 
     response = main.forgot_password(
-        main.ForgotPasswordRequest(email="person@example.com"), (conn, cur)
+        main.ForgotPasswordRequest(email="person@example.com"), tasks, (conn, cur)
     )
 
     assert response == {"message": GENERIC_MESSAGE}
-    assert send_email.called is expected_send
+    send_email.assert_not_called()
+    assert len(tasks.tasks) == int(expected_send)
     assert "SELECT id FROM users" in cur.execute.call_args_list[0].args[0]
     if expected_send:
         lock_sql, lock_params = cur.execute.call_args_list[1].args
@@ -49,7 +52,9 @@ def test_forgot_password_returns_same_generic_message_for_existing_and_missing_u
         assert lock_params == (main.PASSWORD_RESET_LOCK_NAMESPACE, 27)
         cooldown_sql, cooldown_params = cur.execute.call_args_list[2].args
         assert "created_at > NOW()" in cooldown_sql
+        assert "used_at IS NULL AND expires_at > NOW()" in cooldown_sql
         assert cooldown_params == (27, main.PASSWORD_RESET_COOLDOWN_SECONDS)
+        assert tasks.tasks[0].func is main.deliver_password_reset_email
         conn.commit.assert_called_once()
     else:
         conn.commit.assert_not_called()
@@ -59,35 +64,73 @@ def test_forgot_password_cooldown_is_generic_and_preserves_current_reset_token(
     monkeypatch,
 ):
     conn, cur = _db((27,), (True,))
+    tasks = BackgroundTasks()
     send_email = MagicMock()
     monkeypatch.setattr(main, "send_password_reset_email", send_email)
 
     response = main.forgot_password(
-        main.ForgotPasswordRequest(email="person@example.com"), (conn, cur)
+        main.ForgotPasswordRequest(email="person@example.com"), tasks, (conn, cur)
     )
 
     assert response == {"message": GENERIC_MESSAGE}
     send_email.assert_not_called()
+    assert tasks.tasks == []
     assert cur.execute.call_count == 3
     assert "UPDATE password_reset_tokens" not in cur.execute.call_args_list[2].args[0]
     conn.commit.assert_called_once()
 
 
-def test_forgot_password_rolls_back_new_token_if_email_delivery_fails(monkeypatch, caplog):
-    conn, cur = _db((27,), (False,))
+def test_delivery_failure_persists_cooldown_and_repeated_request_preserves_old_token(
+    monkeypatch, caplog
+):
+    first_conn, first_cur = _db((27,), (False,))
+    first_tasks = BackgroundTasks()
+    cleanup_conn, cleanup_cur = _db()
+    retry_conn, retry_cur = _db((27,), (True,))
+    retry_tasks = BackgroundTasks()
     monkeypatch.setattr(
         main,
         "send_password_reset_email",
         MagicMock(side_effect=RuntimeError("provider detail must not be logged")),
     )
+    monkeypatch.setattr(main, "get_db_connection", lambda: cleanup_conn)
 
-    response = main.forgot_password(
-        main.ForgotPasswordRequest(email="person@example.com"), (conn, cur)
+    first_response = main.forgot_password(
+        main.ForgotPasswordRequest(email="person@example.com"),
+        first_tasks,
+        (first_conn, first_cur),
+    )
+    assert first_response == {"message": GENERIC_MESSAGE}
+    assert len(first_tasks.tasks) == 1
+    first_conn.commit.assert_called_once()
+    first_conn.rollback.assert_not_called()
+    assert not any(
+        "UPDATE password_reset_tokens" in call.args[0]
+        for call in first_cur.execute.call_args_list
     )
 
-    assert response == {"message": GENERIC_MESSAGE}
-    conn.rollback.assert_called_once()
-    conn.commit.assert_not_called()
+    task = first_tasks.tasks[0]
+    task.func(*task.args, **task.kwargs)
+    cleanup_sql, cleanup_params = cleanup_cur.execute.call_args.args
+    assert "UPDATE password_reset_tokens" in cleanup_sql
+    assert "WHERE token_hash = %s" in cleanup_sql
+    assert "used_at IS NULL" in cleanup_sql
+    assert "user_id = %s" not in cleanup_sql
+    assert cleanup_params == (task.args[3],)
+    cleanup_conn.commit.assert_called_once()
+    cleanup_conn.rollback.assert_not_called()
+
+    retry_response = main.forgot_password(
+        main.ForgotPasswordRequest(email="person@example.com"),
+        retry_tasks,
+        (retry_conn, retry_cur),
+    )
+
+    assert retry_response == {"message": GENERIC_MESSAGE}
+    assert retry_tasks.tasks == []
+    assert "created_at > NOW()" in retry_cur.execute.call_args_list[2].args[0]
+    retry_conn.commit.assert_called_once()
+    assert "UPDATE password_reset_tokens" not in retry_cur.execute.call_args_list[2].args[0]
     assert "provider detail must not be logged" not in caplog.text
 
 

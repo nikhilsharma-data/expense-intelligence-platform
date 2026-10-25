@@ -14,7 +14,7 @@ import bcrypt
 import jwt
 import pandas as pd
 import pdfplumber
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -746,6 +746,67 @@ def send_password_reset_email(recipient: str, raw_token: str) -> None:
         ),
     })
 
+
+def finalize_password_reset_email_attempt(
+    user_id: int,
+    token_hash: str,
+    delivered: bool,
+) -> None:
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if delivered:
+            cursor.execute(
+                """
+                UPDATE password_reset_tokens
+                SET used_at = NOW()
+                WHERE user_id = %s
+                  AND token_hash <> %s
+                  AND used_at IS NULL
+                """,
+                (user_id, token_hash),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE password_reset_tokens
+                SET used_at = NOW()
+                WHERE token_hash = %s
+                  AND used_at IS NULL
+                """,
+                (token_hash,),
+            )
+        conn.commit()
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        logger.warning("Password reset token finalization failed")
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conn is not None:
+            conn.close()
+
+
+def deliver_password_reset_email(
+    recipient: str,
+    raw_token: str,
+    user_id: int,
+    token_hash: str,
+) -> None:
+    try:
+        send_password_reset_email(recipient, raw_token)
+    except Exception:
+        # The cooldown attempt is already committed. Mark only this newly
+        # created token unusable, leaving any previously delivered link intact.
+        logger.warning("Password reset email delivery failed")
+        finalize_password_reset_email_attempt(user_id, token_hash, delivered=False)
+        return
+
+    finalize_password_reset_email_attempt(user_id, token_hash, delivered=True)
+
 def create_access_token(user_id: int) -> str:
     conn = get_db_connection()
 
@@ -946,6 +1007,7 @@ def login(user: LoginRequest, db=Depends(get_db)):
 @app.post("/forgot-password", response_model=StatusMessage)
 def forgot_password(
     request: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
     db=Depends(get_db),
 ):
     conn, cur = db
@@ -976,7 +1038,10 @@ def forgot_password(
                 SELECT 1
                 FROM password_reset_tokens
                 WHERE user_id = %s
-                  AND created_at > NOW() - (%s * INTERVAL '1 second')
+                  AND (
+                      created_at > NOW() - (%s * INTERVAL '1 second')
+                      OR (used_at IS NULL AND expires_at > NOW())
+                  )
             )
             """,
             (user_id, PASSWORD_RESET_COOLDOWN_SECONDS),
@@ -987,17 +1052,6 @@ def forgot_password(
             # In particular, leave any previously delivered reset link valid.
             conn.commit()
             return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
-
-        # Invalidate any previous unused reset tokens.
-        cur.execute(
-            """
-            UPDATE password_reset_tokens
-            SET used_at = NOW()
-            WHERE user_id = %s
-              AND used_at IS NULL
-            """,
-            (user_id,),
-        )
 
         raw_token, token_hash = generate_password_reset_token()
 
@@ -1014,16 +1068,16 @@ def forgot_password(
             """,
             (user_id, token_hash, expires_at),
         )
-
-        try:
-            send_password_reset_email(email, raw_token)
-        except Exception:
-            # The reset-token insert and invalidation are rolled back together.
-            conn.rollback()
-            logger.warning("Password reset email delivery failed")
-
-        else:
-            conn.commit()
+        # Commit the attempt before delivery so provider failures cannot roll
+        # back the per-account cooldown. The raw token is never stored.
+        conn.commit()
+        background_tasks.add_task(
+            deliver_password_reset_email,
+            email,
+            raw_token,
+            user_id,
+            token_hash,
+        )
 
         return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
 
