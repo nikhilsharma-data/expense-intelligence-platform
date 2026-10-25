@@ -1001,6 +1001,36 @@ def login(user: LoginRequest, db=Depends(get_db)):
         logger.exception("Login failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.post("/logout", response_model=StatusMessage)
+def logout(user_id: int = Depends(get_current_user_id), db=Depends(get_db)):
+    conn, cur = db
+    try:
+        cur.execute(
+            """
+            UPDATE users
+            SET token_version = token_version + 1
+            WHERE id = %s
+            RETURNING id
+            """,
+            (user_id,),
+        )
+        if not cur.fetchone():
+            conn.rollback()
+            raise HTTPException(status_code=401, detail="User no longer exists")
+
+        conn.commit()
+        return {"message": "Logged out; server-side sessions have been revoked."}
+    except HTTPException:
+        raise
+    except Exception:
+        conn.rollback()
+        logger.exception("Server-side logout failed for user %s", user_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Server-side logout failed; the token may remain valid.",
+        )
+
 # -------------------------------
 # Password Reset
 # -------------------------------

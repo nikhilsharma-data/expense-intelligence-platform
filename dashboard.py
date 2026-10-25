@@ -231,6 +231,7 @@ def reset_session():
     st.session_state.processed_upload_key = None
     st.session_state.upload_notice = None
     st.session_state.action_notice = None
+    st.session_state.logout_warning = None
 
 
 # ---------------------------------------------------
@@ -250,6 +251,8 @@ if "upload_notice" not in st.session_state:
     st.session_state.upload_notice = None
 if "action_notice" not in st.session_state:
     st.session_state.action_notice = None
+if "logout_warning" not in st.session_state:
+    st.session_state.logout_warning = None
 
 # ---------------------------------------------------
 # PASSWORD RESET LINK
@@ -309,6 +312,10 @@ if not st.session_state.logged_in:
 
     col1, col2, col3 = st.columns([1, 1.5, 1])
     with col2:
+        if st.session_state.logout_warning:
+            st.warning(st.session_state.logout_warning)
+            st.session_state.logout_warning = None
+
         st.markdown(
             '<div class="login-title">Expense Intelligence</div>',
             unsafe_allow_html=True,
@@ -343,6 +350,7 @@ if not st.session_state.logged_in:
                     st.session_state.user_id = data["user_id"]
                     st.session_state.user_name = data["name"]
                     st.session_state.access_token = data["access_token"]
+                    st.session_state.logout_warning = None
                     st.success("Login successful!")
                     st.rerun()
                 else:
@@ -449,7 +457,25 @@ with st.sidebar:
     )
 
     if st.button("Logout", use_container_width=True):
+        logout_warning = None
+        try:
+            response = requests.post(
+                f"{BASE_URL}/logout",
+                headers=auth_headers(),
+                timeout=REQUEST_TIMEOUT,
+            )
+            if response.status_code != 200:
+                logout_warning = (
+                    "You were logged out on this device, but server-side session "
+                    "revocation could not be confirmed. Your token may remain valid."
+                )
+        except Exception:
+            logout_warning = (
+                "You were logged out on this device, but the server could not be "
+                "reached to revoke the token. It may remain valid until it expires."
+            )
         reset_session()
+        st.session_state.logout_warning = logout_warning
         st.rerun()
 
 # ---------------------------------------------------

@@ -85,7 +85,7 @@ def test_all_user_data_routes_depend_on_verified_identity():
     protected_paths = {
         "/upload", "/delete-transactions", "/delete-account", "/summary",
         "/transactions", "/category-breakdown", "/monthly-trend", "/insights",
-        "/forecast", "/anomalies", "/research-evaluation",
+        "/forecast", "/anomalies", "/research-evaluation", "/logout",
     }
     routes = {route.path: route for route in main.app.routes if getattr(route, "path", None)}
     for path in protected_paths:
@@ -134,3 +134,62 @@ def test_research_evaluation_endpoint_accepts_authenticated_http_request(monkeyp
     assert isinstance(anomaly["confusion_matrix"]["true_positive"], int)
     assert anomaly["cases"]
     assert not {"user_id", "email", "transactions"}.intersection(body)
+
+
+def test_logout_endpoint_rejects_unauthenticated_http_request(monkeypatch):
+    monkeypatch.setattr(main.app.router, "on_startup", [])
+    connection = MagicMock(side_effect=AssertionError("database must not be accessed"))
+    monkeypatch.setattr(main, "get_db_connection", connection)
+
+    response = TestClient(main.app).post("/logout")
+
+    assert response.status_code == 401
+    connection.assert_not_called()
+
+
+def test_authenticated_logout_increments_token_version_and_commits(monkeypatch):
+    monkeypatch.setattr(main.app.router, "on_startup", [])
+    auth_conn = _db_for_token_version(4)
+    logout_conn = MagicMock()
+    logout_cursor = MagicMock()
+    logout_cursor.fetchone.return_value = (73,)
+    logout_conn.cursor.return_value = logout_cursor
+    connections = iter((auth_conn, logout_conn))
+    monkeypatch.setattr(main, "get_db_connection", lambda: next(connections))
+    credentials = _credentials(
+        {
+            "sub": "73",
+            "token_version": 4,
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+    )
+
+    response = TestClient(main.app).post(
+        "/logout",
+        headers={"Authorization": f"Bearer {credentials.credentials}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "message": "Logged out; server-side sessions have been revoked."
+    }
+    sql, params = logout_cursor.execute.call_args.args
+    assert "UPDATE users" in sql
+    assert "token_version = token_version + 1" in sql
+    assert params == (73,)
+    logout_conn.commit.assert_called_once()
+    logout_conn.rollback.assert_not_called()
+
+
+def test_logout_database_failure_rolls_back_and_returns_safe_error():
+    conn = MagicMock()
+    cursor = MagicMock()
+    cursor.execute.side_effect = RuntimeError("private database detail")
+
+    with pytest.raises(HTTPException) as error:
+        main.logout(73, (conn, cursor))
+
+    assert error.value.status_code == 500
+    assert "private database detail" not in error.value.detail
+    conn.rollback.assert_called_once()
+    conn.commit.assert_not_called()
