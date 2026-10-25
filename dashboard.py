@@ -252,6 +252,38 @@ if "action_notice" not in st.session_state:
     st.session_state.action_notice = None
 
 # ---------------------------------------------------
+# PASSWORD RESET LINK
+# ---------------------------------------------------
+reset_token = st.query_params.get("reset_token")
+if reset_token:
+    st.title("Reset your password")
+    with st.form("reset_password_form"):
+        new_password = st.text_input("New password", type="password", key="reset_new_password")
+        confirm_password = st.text_input("Confirm new password", type="password", key="reset_confirm_password")
+        submitted = st.form_submit_button("Reset password", type="primary")
+
+    if submitted:
+        if len(new_password) < 8:
+            st.error("Password must be at least 8 characters long.")
+        elif new_password != confirm_password:
+            st.error("The passwords do not match.")
+        else:
+            try:
+                response = post_json(
+                    "reset-password",
+                    {"token": reset_token, "new_password": new_password},
+                )
+                if response.status_code == 200:
+                    if "reset_token" in st.query_params:
+                        del st.query_params["reset_token"]
+                    st.success("Password reset successfully. You can now sign in.")
+                else:
+                    st.error(response_detail(response, "Password reset failed."))
+            except Exception:
+                st.error("Could not reach the password reset service. Please try again.")
+    st.stop()
+
+# ---------------------------------------------------
 # LOGIN / SIGNUP
 # ---------------------------------------------------
 if not st.session_state.logged_in:
@@ -315,6 +347,30 @@ if not st.session_state.logged_in:
                     st.rerun()
                 else:
                     st.error(response_detail(response, "Login failed"))
+
+            with st.expander("Forgot your password?"):
+                with st.form("forgot_password_form"):
+                    reset_email = st.text_input(
+                        "Account email",
+                        placeholder="you@example.com",
+                        key="forgot_password_email",
+                    )
+                    send_reset = st.form_submit_button("Send reset link")
+                if send_reset:
+                    if not reset_email.strip():
+                        st.error("Enter your account email.")
+                    else:
+                        try:
+                            response = post_json(
+                                "forgot-password",
+                                {"email": reset_email.strip()},
+                            )
+                            if response.status_code == 200:
+                                st.success(response.json().get("message", "If an account exists, a reset link will be sent."))
+                            else:
+                                st.error(response_detail(response, "Could not request a reset link."))
+                        except Exception:
+                            st.error("Could not reach the password reset service. Please try again.")
 
         with auth_tab2:
             name = st.text_input(

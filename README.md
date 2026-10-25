@@ -52,9 +52,12 @@ EXPENSE_API_BASE_URL=http://127.0.0.1:8000
 JWT_SECRET_KEY=generate_a_private_random_secret
 JWT_ALGORITHM=HS256
 JWT_EXPIRATION_MINUTES=60
+RESEND_API_KEY=your_resend_api_key
+RESEND_FROM_EMAIL=your_verified_sender@example.com
+PASSWORD_RESET_URL=http://localhost:8501
 ```
 
-`DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_PORT` are required by the backend. Set a strong private `JWT_SECRET_KEY`, `JWT_ALGORITHM`, and `JWT_EXPIRATION_MINUTES` for authentication. `MAX_UPLOAD_SIZE_MB` and `MAX_UPLOAD_ROWS` limit CSV and PDF imports. Set `ALLOWED_ORIGINS` to the exact dashboard origin(s); the local example covers Streamlit's default local addresses. Set `EXPENSE_API_BASE_URL` in the dashboard environment to the backend address. Production deployments must supply these values through their secret/configuration manager rather than committing credentials.
+`DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, and `DB_PORT` are required by the backend. Set a strong private `JWT_SECRET_KEY`, `JWT_ALGORITHM`, and `JWT_EXPIRATION_MINUTES` for authentication. `MAX_UPLOAD_SIZE_MB` and `MAX_UPLOAD_ROWS` limit CSV and PDF imports. Set `ALLOWED_ORIGINS` to the exact dashboard origin(s); the local example covers Streamlit's default local addresses. Set `EXPENSE_API_BASE_URL` in the dashboard environment to the backend address. For local password recovery, set `RESEND_API_KEY`, an allowed `RESEND_FROM_EMAIL` (the Resend test sender is `onboarding@resend.dev`), and `PASSWORD_RESET_URL=http://localhost:8501`. Production deployments must set `PASSWORD_RESET_URL` to the deployed Streamlit URL, use an appropriate verified sender domain, and supply the API key through the deployment secret manager. Never commit API keys or other credentials.
 
 ## Local Setup
 
@@ -160,7 +163,7 @@ PDF extraction supports text-based statements. Scanned or image-only PDFs need O
 
 ## Authentication and research analytics
 
-Login issues a signed, expiring HS256 bearer token. Protected requests derive the account ID from the token; client-supplied account IDs are not used for authorization. Password reset delivery is not configured, so the forgot-password endpoint currently cannot deliver a usable reset link.
+Login issues a signed, expiring HS256 bearer token. Protected requests derive the account ID from the token; client-supplied account IDs are not used for authorization. Password recovery uses Resend to send a 15-minute reset link. The forgot-password response is the same for existing and unknown email addresses, and email delivery failures roll back the new reset token. Reset tokens are stored as SHA-256 hashes and claimed atomically; successful resets hash the new password and increment `token_version`, invalidating existing sessions. Configure `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, and `PASSWORD_RESET_URL` on the backend. Local links use `http://localhost:8501`; production must use the deployed Streamlit URL over HTTPS and a sender from a verified Resend domain.
 
 The dashboard includes an explainable one-month expense forecast. It aggregates negative transaction amounts by calendar month, fills missing months with zero, and forecasts with the mean of up to the latest three months. The last-observed-month baseline is shown alongside chronological rolling-origin MAE/RMSE for both methods; every backtest prediction uses only months before its target. A forecast needs at least three calendar months; evaluation metrics require at least two held-out months and are withheld otherwise. The database does not store currency, so outputs are labeled in imported amount units. This small-sample estimate has no confidence interval or accuracy guarantee.
 

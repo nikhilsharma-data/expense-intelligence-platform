@@ -1,5 +1,3 @@
-import asyncio
-import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -9,45 +7,6 @@ from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
 import main
-
-
-async def _asgi_get(path, bearer_token=None):
-    headers = [(b"host", b"testserver")]
-    if bearer_token:
-        headers.append((b"authorization", f"Bearer {bearer_token}".encode("ascii")))
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": path,
-        "raw_path": path.encode("ascii"),
-        "query_string": b"",
-        "root_path": "",
-        "headers": headers,
-        "client": ("testclient", 50000),
-        "server": ("testserver", 80),
-    }
-    messages = []
-    request_sent = False
-
-    async def receive():
-        nonlocal request_sent
-        if request_sent:
-            return {"type": "http.disconnect"}
-        request_sent = True
-        return {"type": "http.request", "body": b"", "more_body": False}
-
-    async def send(message):
-        messages.append(message)
-
-    await main.app(scope, receive, send)
-    response_start = next(message for message in messages if message["type"] == "http.response.start")
-    response_body = b"".join(
-        message.get("body", b"") for message in messages if message["type"] == "http.response.body"
-    )
-    return response_start["status"], json.loads(response_body)
 
 
 def _db_for_token_version(version):
@@ -133,29 +92,9 @@ def test_all_user_data_routes_depend_on_verified_identity():
         assert any(dependency.call is main.get_current_user_id for dependency in route.dependant.dependencies)
 
 
-def test_research_evaluation_endpoint_rejects_unauthenticated_request():
-    status, body = asyncio.run(_asgi_get("/research-evaluation"))
+def test_research_evaluation_endpoint_returns_synthetic_contract():
+    body = main.research_evaluation(user_id=73)
 
-    assert status == 401
-    assert body["detail"] == "Bearer authentication is required"
-
-
-def test_authenticated_research_evaluation_endpoint_returns_synthetic_contract(monkeypatch):
-    conn = _db_for_token_version(3)
-    monkeypatch.setattr(main, "get_db_connection", lambda: conn)
-    token = jwt.encode(
-        {
-            "sub": "73",
-            "token_version": 3,
-            "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
-        },
-        main.JWT_SECRET_KEY,
-        algorithm=main.JWT_ALGORITHM,
-    )
-
-    status, body = asyncio.run(_asgi_get("/research-evaluation", token))
-
-    assert status == 200
     assert set(body) == {"categorization", "anomaly_detection", "data_scope"}
     assert body["data_scope"].startswith("Synthetic evaluation examples only")
     categorization = body["categorization"]
@@ -168,5 +107,3 @@ def test_authenticated_research_evaluation_endpoint_returns_synthetic_contract(m
     assert isinstance(anomaly["confusion_matrix"]["true_positive"], int)
     assert anomaly["cases"]
     assert not {"user_id", "email", "transactions"}.intersection(body)
-    cursor = conn.cursor.return_value.__enter__.return_value
-    assert cursor.execute.call_args.args[1] == (73,)

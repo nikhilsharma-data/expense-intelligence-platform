@@ -1,4 +1,5 @@
 import hashlib
+from html import escape
 import logging
 from math import isfinite
 import os
@@ -7,6 +8,7 @@ import secrets
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from typing import List, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import bcrypt
 import jwt
@@ -16,6 +18,8 @@ from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+import resend
 
 from db import get_db_connection
 from analytics import detect_unusual_spending, monthly_spending_forecast
@@ -45,6 +49,9 @@ JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 JWT_EXPIRATION_MINUTES = int(
     os.getenv("JWT_EXPIRATION_MINUTES", "60")
 )
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL")
+PASSWORD_RESET_URL = os.getenv("PASSWORD_RESET_URL")
 
 if not JWT_SECRET_KEY:
     raise RuntimeError("JWT_SECRET_KEY environment variable is required")
@@ -685,6 +692,56 @@ def generate_password_reset_token() -> tuple[str, str]:
 
     return raw_token, token_hash
 
+
+PASSWORD_RESET_GENERIC_MESSAGE = (
+    "If an account exists for this email, a password reset link has been sent."
+)
+
+
+def build_password_reset_url(raw_token: str) -> str:
+    parsed = urlsplit(PASSWORD_RESET_URL)
+    local_hosts = {"localhost", "127.0.0.1", "::1"}
+    is_secure = parsed.scheme == "https" or (
+        parsed.scheme == "http" and parsed.hostname in local_hosts
+    )
+    if not is_secure or not parsed.netloc or parsed.username or parsed.password:
+        raise RuntimeError("PASSWORD_RESET_URL must be HTTPS, except for local development")
+
+    query = [(key, value) for key, value in parse_qsl(parsed.query) if key != "reset_token"]
+    query.append(("reset_token", raw_token))
+    return urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urlencode(query),
+        parsed.fragment,
+    ))
+
+
+def send_password_reset_email(recipient: str, raw_token: str) -> None:
+    if not RESEND_API_KEY or not RESEND_FROM_EMAIL or not PASSWORD_RESET_URL:
+        raise RuntimeError("Password reset email configuration is incomplete")
+
+    reset_url = build_password_reset_url(raw_token)
+    resend.api_key = RESEND_API_KEY
+    resend.Emails.send({
+        "from": RESEND_FROM_EMAIL,
+        "to": [recipient],
+        "subject": "Reset your Expense Intelligence password",
+        "html": (
+            "<p>We received a request to reset your password.</p>"
+            f'<p><a href="{escape(reset_url, quote=True)}">Reset your password</a></p>'
+            "<p>This link expires in 15 minutes. If you did not request it, "
+            "you can ignore this email.</p>"
+        ),
+        "text": (
+            "We received a request to reset your password.\n\n"
+            f"Reset your password: {reset_url}\n\n"
+            "This link expires in 15 minutes. If you did not request it, "
+            "you can ignore this email."
+        ),
+    })
+
 def create_access_token(user_id: int) -> str:
     conn = get_db_connection()
 
@@ -897,11 +954,8 @@ def forgot_password(
         )
         row = cur.fetchone()
 
-        # Always return the same response whether the account exists or not.
         if not row:
-            return {
-                "message": "If an account exists for this email, a password reset link has been sent."
-            }
+            return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
 
         user_id = row[0]
 
@@ -932,13 +986,17 @@ def forgot_password(
             (user_id, token_hash, expires_at),
         )
 
-        conn.commit()
+        try:
+            send_password_reset_email(email, raw_token)
+        except Exception:
+            # The reset-token insert and invalidation are rolled back together.
+            conn.rollback()
+            logger.warning("Password reset email delivery failed")
 
-        # Password reset delivery is not implemented; do not log reset secrets.
+        else:
+            conn.commit()
 
-        return {
-            "message": "If an account exists for this email, a password reset link has been sent."
-        }
+        return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
 
     except Exception:
         conn.rollback()
@@ -974,13 +1032,16 @@ def reset_password(
             request.token.encode("utf-8")
         ).hexdigest()
 
+        # Claim and consume in one statement. PostgreSQL row locking ensures
+        # concurrent requests cannot both claim the same unused token.
         cur.execute(
             """
-            SELECT id, user_id
-            FROM password_reset_tokens
+            UPDATE password_reset_tokens
+            SET used_at = NOW()
             WHERE token_hash = %s
               AND used_at IS NULL
               AND expires_at > NOW()
+            RETURNING id, user_id
             """,
             (token_hash,),
         )
@@ -993,7 +1054,7 @@ def reset_password(
                 detail="Invalid or expired password reset token",
             )
 
-        reset_token_id, user_id = row
+        _reset_token_id, user_id = row
 
         new_password_hash = hash_password(
             request.new_password
@@ -1009,15 +1070,6 @@ def reset_password(
             (new_password_hash, user_id),
         )
 
-        cur.execute(
-            """
-            UPDATE password_reset_tokens
-            SET used_at = NOW()
-            WHERE id = %s
-            """,
-            (reset_token_id,),
-        )
-
         conn.commit()
 
         logger.info(
@@ -1030,6 +1082,7 @@ def reset_password(
         }
 
     except HTTPException:
+        conn.rollback()
         raise
 
     except Exception:
