@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 import jwt
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from fastapi.security import HTTPAuthorizationCredentials
 
 import main
@@ -92,8 +93,34 @@ def test_all_user_data_routes_depend_on_verified_identity():
         assert any(dependency.call is main.get_current_user_id for dependency in route.dependant.dependencies)
 
 
-def test_research_evaluation_endpoint_returns_synthetic_contract():
-    body = main.research_evaluation(user_id=73)
+def test_research_evaluation_endpoint_rejects_unauthenticated_http_request(monkeypatch):
+    monkeypatch.setattr(main.app.router, "on_startup", [])
+    response = TestClient(main.app).get("/research-evaluation")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Bearer authentication is required"
+
+
+def test_research_evaluation_endpoint_accepts_authenticated_http_request(monkeypatch):
+    monkeypatch.setattr(main.app.router, "on_startup", [])
+    monkeypatch.setattr(main, "get_db_connection", lambda: _db_for_token_version(3))
+    token = jwt.encode(
+        {
+            "sub": "73",
+            "token_version": 3,
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+        },
+        main.JWT_SECRET_KEY,
+        algorithm=main.JWT_ALGORITHM,
+    )
+
+    response = TestClient(main.app).get(
+        "/research-evaluation",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
 
     assert set(body) == {"categorization", "anomaly_detection", "data_scope"}
     assert body["data_scope"].startswith("Synthetic evaluation examples only")

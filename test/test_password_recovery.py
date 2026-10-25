@@ -25,11 +25,14 @@ def _db(*fetch_rows):
     return conn, cur
 
 
-@pytest.mark.parametrize("user_row", [(27,), None])
+@pytest.mark.parametrize(
+    ("rows", "expected_send"),
+    [([(27,), (False,)], True), ([None], False)],
+)
 def test_forgot_password_returns_same_generic_message_for_existing_and_missing_user(
-    monkeypatch, user_row
+    monkeypatch, rows, expected_send
 ):
-    conn, cur = _db(user_row)
+    conn, cur = _db(*rows)
     send_email = MagicMock()
     monkeypatch.setattr(main, "send_password_reset_email", send_email)
 
@@ -38,15 +41,40 @@ def test_forgot_password_returns_same_generic_message_for_existing_and_missing_u
     )
 
     assert response == {"message": GENERIC_MESSAGE}
-    assert send_email.called is bool(user_row)
-    if user_row:
+    assert send_email.called is expected_send
+    assert "SELECT id FROM users" in cur.execute.call_args_list[0].args[0]
+    if expected_send:
+        lock_sql, lock_params = cur.execute.call_args_list[1].args
+        assert "pg_advisory_xact_lock" in lock_sql
+        assert lock_params == (main.PASSWORD_RESET_LOCK_NAMESPACE, 27)
+        cooldown_sql, cooldown_params = cur.execute.call_args_list[2].args
+        assert "created_at > NOW()" in cooldown_sql
+        assert cooldown_params == (27, main.PASSWORD_RESET_COOLDOWN_SECONDS)
         conn.commit.assert_called_once()
     else:
         conn.commit.assert_not_called()
 
 
+def test_forgot_password_cooldown_is_generic_and_preserves_current_reset_token(
+    monkeypatch,
+):
+    conn, cur = _db((27,), (True,))
+    send_email = MagicMock()
+    monkeypatch.setattr(main, "send_password_reset_email", send_email)
+
+    response = main.forgot_password(
+        main.ForgotPasswordRequest(email="person@example.com"), (conn, cur)
+    )
+
+    assert response == {"message": GENERIC_MESSAGE}
+    send_email.assert_not_called()
+    assert cur.execute.call_count == 3
+    assert "UPDATE password_reset_tokens" not in cur.execute.call_args_list[2].args[0]
+    conn.commit.assert_called_once()
+
+
 def test_forgot_password_rolls_back_new_token_if_email_delivery_fails(monkeypatch, caplog):
-    conn, cur = _db((27,))
+    conn, cur = _db((27,), (False,))
     monkeypatch.setattr(
         main,
         "send_password_reset_email",

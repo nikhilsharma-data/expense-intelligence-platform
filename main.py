@@ -696,6 +696,10 @@ def generate_password_reset_token() -> tuple[str, str]:
 PASSWORD_RESET_GENERIC_MESSAGE = (
     "If an account exists for this email, a password reset link has been sent."
 )
+# Match the token lifetime so a later request cannot invalidate a still-valid
+# link by replacing it during its 15-minute validity window.
+PASSWORD_RESET_COOLDOWN_SECONDS = 15 * 60
+PASSWORD_RESET_LOCK_NAMESPACE = 0x455850
 
 
 def build_password_reset_url(raw_token: str) -> str:
@@ -958,6 +962,31 @@ def forgot_password(
             return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
 
         user_id = row[0]
+
+        # Serialize reset requests for this user without taking the users row
+        # lock: reset_password locks the token row before updating users.
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(%s, %s)",
+            (PASSWORD_RESET_LOCK_NAMESPACE, user_id),
+        )
+
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM password_reset_tokens
+                WHERE user_id = %s
+                  AND created_at > NOW() - (%s * INTERVAL '1 second')
+            )
+            """,
+            (user_id, PASSWORD_RESET_COOLDOWN_SECONDS),
+        )
+        recent_request = cur.fetchone()
+        if recent_request and recent_request[0]:
+            # Commit to release the transaction-scoped advisory lock.
+            # In particular, leave any previously delivered reset link valid.
+            conn.commit()
+            return {"message": PASSWORD_RESET_GENERIC_MESSAGE}
 
         # Invalidate any previous unused reset tokens.
         cur.execute(
