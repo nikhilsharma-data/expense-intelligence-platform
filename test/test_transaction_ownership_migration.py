@@ -32,6 +32,10 @@ def _validated_test_url():
         raise RuntimeError(
             "Set ALLOW_TEST_DB_DESTRUCTIVE_SETUP=1 to create isolated test objects"
         )
+    if any(os.getenv(name) for name in ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")):
+        raise RuntimeError(
+            "Refusing PostgreSQL connection while libpq host or service overrides are configured"
+        )
     dsn = os.getenv("TEST_DATABASE_URL")
     if not dsn:
         raise RuntimeError("TEST_DATABASE_URL is required for PostgreSQL integration tests")

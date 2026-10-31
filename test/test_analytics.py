@@ -1,4 +1,6 @@
-from datetime import date
+from datetime import date, timedelta
+import random
+from statistics import median
 
 from analytics import (
     detect_unusual_spending,
@@ -87,3 +89,74 @@ def test_anomaly_explanation_includes_historical_reference_and_threshold():
     assert flag["threshold_amount"] == 110
     assert "3 earlier same-category transactions" in flag["reason"]
     assert "not confirmed fraud" in flag["reason"]
+
+
+def test_optimized_anomaly_results_match_reference_median_mad_method():
+    generator = random.Random(20261031)
+    rows = []
+    for index in range(160):
+        category = ("Food", "Travel", "Food", "Shopping")[index % 4]
+        amount = -generator.choice((5, 10, 10, 12, 20, 35, 120, 400))
+        rows.append((date(2026, 1, 1) + timedelta(days=index // 4), f"synthetic-{index}", category, amount))
+
+    expected = _reference_anomaly_result(rows)
+
+    assert detect_unusual_spending(rows) == expected
+
+
+def _reference_anomaly_result(rows, minimum_history=3, threshold=3.5):
+    transactions = []
+    for txn_date, description, category, amount in rows:
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            continue
+        if amount >= 0:
+            continue
+        transactions.append({
+            "date": txn_date.isoformat(),
+            "description": str(description or ""),
+            "category": str(category or "Others"),
+            "amount": abs(amount),
+        })
+    transactions.sort(key=lambda item: item["date"])
+    flags = []
+    for txn in transactions:
+        history = [
+            prior["amount"] for prior in transactions
+            if prior["category"] == txn["category"] and prior["date"] < txn["date"]
+        ]
+        if len(history) < minimum_history:
+            continue
+        center = median(history)
+        mad = median([abs(value - center) for value in history])
+        scale = 1.4826 * mad
+        if scale == 0:
+            threshold_amount = max(center * 2, center + 100)
+            score = None
+            unusual = txn["amount"] > threshold_amount
+            threshold_reason = f"amount above {threshold_amount:.2f} (zero historical MAD rule)"
+        else:
+            threshold_amount = center + threshold * scale
+            score = (txn["amount"] - center) / scale
+            unusual = score >= threshold
+            threshold_reason = f"robust deviation at least {threshold:.1f}"
+        if unusual:
+            flags.append({
+                **txn,
+                "possible_anomaly": True,
+                "historical_sample_size": len(history),
+                "historical_median": round(center, 2),
+                "historical_mad": round(mad, 2),
+                "threshold_amount": round(threshold_amount, 2),
+                "robust_deviation": None if score is None else round(score, 2),
+                "reason": (f"{txn['category']} amount {txn['amount']:.2f} exceeds the {threshold_reason}; "
+                           f"reference: {len(history)} earlier same-category transactions, "
+                           f"median {center:.2f}, MAD {mad:.2f}. This is a possible unusual expense, not confirmed fraud."),
+            })
+    return {
+        "flags": flags,
+        "minimum_history": minimum_history,
+        "label": "Possible unusual spending only; flags are not confirmed fraud.",
+        "sparse_history_message": f"At least {minimum_history} earlier same-category transactions are required before a flag can be considered.",
+    }

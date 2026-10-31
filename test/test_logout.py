@@ -10,14 +10,25 @@ OFFLINE_WARNING = "server could not be reached to revoke the token"
 
 
 def _logged_in_dashboard(monkeypatch, post):
+    def fake_get(url, **_kwargs):
+        if url.endswith("/me"):
+            return SimpleNamespace(
+                status_code=200,
+                text="",
+                json=lambda: {
+                    "id": 73,
+                    "name": "Synthetic User",
+                    "email": "synthetic@example.com",
+                    "role": "user",
+                    "is_active": True,
+                },
+            )
+        return SimpleNamespace(status_code=503, text="Unavailable", json=lambda: {})
+
     monkeypatch.setattr(
         requests,
         "get",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            status_code=503,
-            text="Unavailable",
-            json=lambda: {},
-        ),
+        fake_get,
     )
     monkeypatch.setattr(requests, "post", post)
 
@@ -53,6 +64,9 @@ def test_dashboard_logout_posts_bearer_token_then_clears_local_state(monkeypatch
     assert app.session_state["logged_in"] is False
     assert app.session_state["user_id"] is None
     assert app.session_state["access_token"] is None
+    assert app.session_state["current_role"] is None
+    assert app.session_state["role_access_token"] is None
+    assert app.session_state["current_user_profile"] is None
     assert not app.warning
 
 

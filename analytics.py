@@ -1,10 +1,10 @@
 """Deterministic forecasting and unusual-spending explanations."""
 from __future__ import annotations
 
+from bisect import bisect_right, insort
 from collections import defaultdict
 from datetime import date, datetime
 from math import isfinite, sqrt
-from statistics import median
 
 
 def _as_date(value):
@@ -163,6 +163,62 @@ def monthly_spending_forecast(rows, minimum_history=3, window=3, minimum_evaluat
     return base
 
 
+def _median_sorted(values):
+    middle = len(values) // 2
+    if len(values) % 2:
+        return values[middle]
+    return (values[middle - 1] + values[middle]) / 2
+
+
+def _median_absolute_deviation_sorted(values, center):
+    """Select the median of absolute deviations from two sorted value halves."""
+    left_count = bisect_right(values, center)
+    left_length = left_count
+    right_length = len(values) - left_count
+
+    def left_distance(index):
+        return center - values[left_count - index - 1]
+
+    def right_distance(index):
+        return values[left_count + index] - center
+
+    def kth_distance(k):
+        # Find the (k+1)-sized partition of the two ascending distance lists.
+        target_size = k + 1
+        low = max(0, target_size - right_length)
+        high = min(target_size, left_length)
+        while low <= high:
+            left_size = (low + high) // 2
+            right_size = target_size - left_size
+            if (
+                left_size > 0
+                and right_size < right_length
+                and left_distance(left_size - 1) > right_distance(right_size)
+            ):
+                high = left_size - 1
+            elif (
+                right_size > 0
+                and left_size < left_length
+                and right_distance(right_size - 1) > left_distance(left_size)
+            ):
+                low = left_size + 1
+            else:
+                if left_size == 0:
+                    return right_distance(right_size - 1)
+                if right_size == 0:
+                    return left_distance(left_size - 1)
+                return max(
+                    left_distance(left_size - 1),
+                    right_distance(right_size - 1),
+                )
+        raise RuntimeError("Could not select historical deviation")
+
+    middle = len(values) // 2
+    if len(values) % 2:
+        return kth_distance(middle)
+    return (kth_distance(middle - 1) + kth_distance(middle)) / 2
+
+
 def detect_unusual_spending(rows, minimum_history=3, threshold=3.5):
     """Flag unusually high transaction amounts against earlier same-category data."""
     transactions = []
@@ -183,15 +239,26 @@ def detect_unusual_spending(rows, minimum_history=3, threshold=3.5):
     transactions.sort(key=lambda item: item["date"])
 
     flags = []
+    histories = defaultdict(list)
+    pending = []
+    active_date = None
+
+    def add_pending_to_history():
+        for category, amount in pending:
+            insort(histories[category], amount)
+        pending.clear()
+
     for txn in transactions:
-        history = [
-            prior["amount"] for prior in transactions
-            if prior["category"] == txn["category"] and prior["date"] < txn["date"]
-        ]
+        if active_date is not None and txn["date"] != active_date:
+            add_pending_to_history()
+        active_date = txn["date"]
+        history = histories[txn["category"]]
         if len(history) < minimum_history:
+            pending.append((txn["category"], txn["amount"]))
             continue
-        center = median(history)
-        mad = median([abs(value - center) for value in history])
+
+        center = _median_sorted(history)
+        mad = _median_absolute_deviation_sorted(history, center)
         scale = 1.4826 * mad
         if scale == 0:
             threshold_amount = max(center * 2, center + 100)
@@ -203,20 +270,22 @@ def detect_unusual_spending(rows, minimum_history=3, threshold=3.5):
             score = (txn["amount"] - center) / scale
             unusual = score >= threshold
             threshold_reason = f"robust deviation at least {threshold:.1f}"
-        if not unusual:
-            continue
-        flags.append({
-            **txn,
-            "possible_anomaly": True,
-            "historical_sample_size": len(history),
-            "historical_median": round(center, 2),
-            "historical_mad": round(mad, 2),
-            "threshold_amount": round(threshold_amount, 2),
-            "robust_deviation": None if score is None else round(score, 2),
-            "reason": (f"{txn['category']} amount {txn['amount']:.2f} exceeds the {threshold_reason}; "
-                       f"reference: {len(history)} earlier same-category transactions, "
-                       f"median {center:.2f}, MAD {mad:.2f}. This is a possible unusual expense, not confirmed fraud."),
-        })
+        if unusual:
+            flags.append({
+                **txn,
+                "possible_anomaly": True,
+                "historical_sample_size": len(history),
+                "historical_median": round(center, 2),
+                "historical_mad": round(mad, 2),
+                "threshold_amount": round(threshold_amount, 2),
+                "robust_deviation": None if score is None else round(score, 2),
+                "reason": (f"{txn['category']} amount {txn['amount']:.2f} exceeds the {threshold_reason}; "
+                           f"reference: {len(history)} earlier same-category transactions, "
+                           f"median {center:.2f}, MAD {mad:.2f}. This is a possible unusual expense, not confirmed fraud."),
+            })
+        pending.append((txn["category"], txn["amount"]))
+
+    add_pending_to_history()
     return {
         "flags": flags,
         "minimum_history": minimum_history,

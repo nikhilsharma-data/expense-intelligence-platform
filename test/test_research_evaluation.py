@@ -1,3 +1,4 @@
+import main
 from main import categorize
 from research_evaluation import (
     CATEGORIZATION_DATA,
@@ -125,3 +126,28 @@ def test_anomaly_explanations_use_prior_history_and_report_mad_threshold():
     assert nonzero_mad["historical_mad"] == 10
     assert nonzero_mad["explanation"]
     assert "4 earlier same-category transactions" in nonzero_mad["explanation"]
+
+
+def test_static_research_evaluation_is_cached_without_user_data(monkeypatch):
+    calls = {"categorization": 0, "anomaly": 0}
+
+    def categorization(_categorizer):
+        calls["categorization"] += 1
+        return {"synthetic": True}
+
+    def anomaly():
+        calls["anomaly"] += 1
+        return {"synthetic": True}
+
+    main.get_research_evaluation_payload.cache_clear()
+    monkeypatch.setattr(main, "evaluate_categorization", categorization)
+    monkeypatch.setattr(main, "evaluate_anomaly_detection", anomaly)
+    try:
+        first = main.get_research_evaluation_payload()
+        second = main.get_research_evaluation_payload()
+    finally:
+        main.get_research_evaluation_payload.cache_clear()
+
+    assert first == second
+    assert first["data_scope"].startswith("Synthetic evaluation")
+    assert calls == {"categorization": 1, "anomaly": 1}

@@ -261,10 +261,9 @@ def test_signup_and_login_still_hash_passwords_and_issue_access_tokens(monkeypat
         51,
         "Test User",
         signup_params[2],
+        True,
+        0,
     )
-    token_conn = MagicMock()
-    token_conn.cursor.return_value.__enter__.return_value.fetchone.return_value = (0,)
-    monkeypatch.setattr(main, "get_db_connection", lambda: token_conn)
 
     login_response = main.login(
         main.LoginRequest(email="person@example.com", password="old-password-123"),
@@ -312,6 +311,8 @@ def test_dashboard_reset_form_posts_password_and_clears_query_token(monkeypatch)
     app = AppTest.from_file(str(DASHBOARD)).run(timeout=20)
     app.query_params["reset_token"] = "synthetic-reset-token"
     app.run(timeout=20)
+    assert "reset_token" not in app.query_params
+    assert app.session_state["password_reset_token"] == "synthetic-reset-token"
     app.text_input(key="reset_new_password").set_value("new-password-123")
     app.text_input(key="reset_confirm_password").set_value("new-password-123")
     app.button(key="FormSubmitter:reset_password_form-Reset password").click()
@@ -323,7 +324,7 @@ def test_dashboard_reset_form_posts_password_and_clears_query_token(monkeypatch)
         "token": "synthetic-reset-token",
         "new_password": "new-password-123",
     }
-    assert "reset_token" not in app.query_params
+    assert app.session_state["password_reset_token"] is None
     assert any("Password reset successfully" in item.value for item in app.success)
 
 
