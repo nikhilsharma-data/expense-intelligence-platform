@@ -50,7 +50,8 @@ MAX_UPLOAD_SIZE_MB=10
 MAX_UPLOAD_ROWS=5000
 EXPENSE_API_BASE_URL=http://127.0.0.1:8000
 EXPENSE_DEPLOYMENT_ENV=development
-JWT_SECRET_KEY=generate_a_private_random_secret
+JWT_SECRET_KEY=replace-with-a-unique-random-secret
+# Generate a strong random JWT secret unique to each deployment.
 JWT_ALGORITHM=HS256
 JWT_EXPIRATION_MINUTES=60
 RESEND_API_KEY=your_resend_api_key
