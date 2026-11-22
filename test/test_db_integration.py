@@ -16,7 +16,7 @@ from urllib.parse import unquote, urlsplit
 import dotenv
 import psycopg2
 import pytest
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException, Response, UploadFile
 
 
 # Importing main normally imports db.py, whose module body loads .env. Prevent
@@ -316,7 +316,7 @@ def test_transaction_reads_and_deletes_are_user_scoped(test_schema, seeded_users
     handler_conn = _connect(schema)
     handler_cur = handler_conn.cursor()
     try:
-        rows = main.get_transactions(user_id=user_id, db=(handler_conn, handler_cur))
+        rows = main.get_transactions(response=Response(), user_id=user_id, db=(handler_conn, handler_cur))
         assert {row["description"] for row in rows} == {f"old-{suffix}-one", f"old-{suffix}-two"}
         assert all(f"other-{suffix}" not in row["description"] for row in rows)
 

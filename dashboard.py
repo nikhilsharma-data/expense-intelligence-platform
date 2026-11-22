@@ -19,13 +19,19 @@ st.set_page_config(
 
 try:
     _secret_api_url = st.secrets.get("EXPENSE_API_BASE_URL", None)
+    _secret_deployment_env = st.secrets.get("EXPENSE_DEPLOYMENT_ENV", None)
 except Exception:
     _secret_api_url = None
+    _secret_deployment_env = None
+
+_deployment_environment = os.getenv("EXPENSE_DEPLOYMENT_ENV")
+if not (_deployment_environment and _deployment_environment.strip()):
+    _deployment_environment = _secret_deployment_env or "development"
 
 BASE_URL = resolve_expense_api_base_url(
     environment_url=os.getenv("EXPENSE_API_BASE_URL"),
     secret_url=_secret_api_url,
-    deployment_environment=os.getenv("EXPENSE_DEPLOYMENT_ENV", "development"),
+    deployment_environment=_deployment_environment,
 )
 REQUEST_TIMEOUT = 30
 

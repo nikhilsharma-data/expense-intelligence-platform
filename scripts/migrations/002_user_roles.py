@@ -123,9 +123,9 @@ def apply_migration(connection, schema):
                     FROM pg_constraint AS role_constraint
                     WHERE role_constraint.conrelid = %s
                       AND role_constraint.contype = 'c'
-                      AND pg_get_constraintdef(role_constraint.oid) ILIKE '%role%'
+                      AND pg_get_constraintdef(role_constraint.oid) ILIKE %s
                     """,
-                    (users_oid,),
+                    (users_oid, "%role%"),
                 )
                 constraints = cursor.fetchall()
                 if any(not _equivalent_role_check(row[1]) for row in constraints):
